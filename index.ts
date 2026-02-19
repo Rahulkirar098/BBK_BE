@@ -7,6 +7,30 @@ import admin from "firebase-admin";
 dotenv.config();
 
 /* =========================================================
+   TYPES
+========================================================= */
+
+export const SESSION_STATUS = {
+  OPEN: "open",
+  MIN_REACHED: "min_reached",
+  FULL: "full",
+  CLAIMED: "claimed",
+  CANCELLED: "cancelled",
+} as const;
+
+export type SessionStatus =
+  typeof SESSION_STATUS[keyof typeof SESSION_STATUS];
+
+export const RIDER_PAYMENT_STATUS = {
+  AUTHORIZED: "authorized",
+  CAPTURED: "captured",
+  CANCELLED: "cancelled",
+} as const;
+
+export type RiderPaymentStatus =
+  typeof RIDER_PAYMENT_STATUS[keyof typeof RIDER_PAYMENT_STATUS];
+
+/* =========================================================
    INIT
 ========================================================= */
 
@@ -23,7 +47,25 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
 const db = admin.firestore();
 
 /* =========================================================
-   1️⃣ CREATE PAYMENT INTENT (HOLD ONLY)
+   HELPERS
+========================================================= */
+
+const isFinalStatus = (status: SessionStatus) => {
+  return (
+    status === SESSION_STATUS.CLAIMED ||
+    status === SESSION_STATUS.CANCELLED
+  );
+};
+
+const canClaim = (status: SessionStatus) => {
+  return (
+    status === SESSION_STATUS.MIN_REACHED ||
+    status === SESSION_STATUS.FULL
+  );
+};
+
+/* =========================================================
+   1️⃣ CREATE PAYMENT INTENT (HOLD FUNDS)
 ========================================================= */
 
 app.post("/create-payment-intent", async (req, res) => {
@@ -41,10 +83,12 @@ app.post("/create-payment-intent", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    const session = snap.data()!;
+    const session: any = snap.data();
+    const status: SessionStatus =
+      session.status || SESSION_STATUS.OPEN;
 
-    if (session.status === "confirmed") {
-      return res.status(400).json({ error: "Session already confirmed" });
+    if (isFinalStatus(status)) {
+      return res.status(400).json({ error: "Session not bookable" });
     }
 
     if (session.bookedSeats >= session.totalSeats) {
@@ -54,7 +98,7 @@ app.post("/create-payment-intent", async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.create({
       amount: session.pricePerSeat * 100,
       currency: "aed",
-      capture_method: "manual", // 🔥 HOLD FUNDS
+      capture_method: "manual",
       metadata: {
         sessionId,
         operatorUid,
@@ -73,12 +117,13 @@ app.post("/create-payment-intent", async (req, res) => {
 });
 
 /* =========================================================
-   2️⃣ FINALIZE BOOKING (After Stripe Confirm)
+   2️⃣ FINALIZE BOOKING
 ========================================================= */
 
 app.post("/finalize-booking", async (req, res) => {
   try {
-    const { sessionId, operatorUid, riderUid, paymentIntentId } = req.body;
+    const { sessionId, operatorUid, riderUid, paymentIntentId } =
+      req.body;
 
     if (!sessionId || !operatorUid || !riderUid || !paymentIntentId) {
       return res.status(400).json({ error: "Missing parameters" });
@@ -93,7 +138,13 @@ app.post("/finalize-booking", async (req, res) => {
         throw new Error("Session not found");
       }
 
-      const session = snap.data()!;
+      const session: any = snap.data();
+      const status: SessionStatus =
+        session.status || SESSION_STATUS.OPEN;
+
+      if (isFinalStatus(status)) {
+        throw new Error("Session not bookable");
+      }
 
       if (session.bookedSeats >= session.totalSeats) {
         throw new Error("Session full");
@@ -114,20 +165,23 @@ app.post("/finalize-booking", async (req, res) => {
         {
           uid: riderUid,
           paymentIntentId,
-          status: "authorized",
+          status: RIDER_PAYMENT_STATUS.AUTHORIZED,
         },
       ];
 
-      const updatePayload: any = {
-        bookedSeats: newBookedSeats,
-        ridersProfile: updatedRiders,
-      };
+      let newStatus: SessionStatus = SESSION_STATUS.OPEN;
 
-      if (newBookedSeats >= session.minRidersToConfirm) {
-        updatePayload.status = "ready_for_claim";
+      if (newBookedSeats >= session.totalSeats) {
+        newStatus = SESSION_STATUS.FULL;
+      } else if (newBookedSeats >= session.minRidersToConfirm) {
+        newStatus = SESSION_STATUS.MIN_REACHED;
       }
 
-      tx.update(sessionRef, updatePayload);
+      tx.update(sessionRef, {
+        bookedSeats: newBookedSeats,
+        ridersProfile: updatedRiders,
+        status: newStatus,
+      });
     });
 
     return res.json({ success: true });
@@ -156,31 +210,29 @@ app.post("/claim-session", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    const session = snap.data()!;
+    const session: any = snap.data();
+    const status: SessionStatus = session.status;
 
-    if (session.status === "confirmed") {
-      return res.status(400).json({ error: "Already claimed" });
-    }
-
-    if (session.bookedSeats < session.minRidersToConfirm) {
-      return res.status(400).json({ error: "Minimum riders not reached" });
+    if (!canClaim(status)) {
+      return res.status(400).json({ error: "Not ready to claim" });
     }
 
     const riders = session.ridersProfile || [];
 
     for (const rider of riders) {
-      if (rider.paymentIntentId) {
+      if (
+        rider.paymentIntentId &&
+        rider.status === RIDER_PAYMENT_STATUS.AUTHORIZED
+      ) {
         await stripe.paymentIntents.capture(rider.paymentIntentId);
+        rider.status = RIDER_PAYMENT_STATUS.CAPTURED;
       }
     }
 
     await sessionRef.update({
-      status: "confirmed",
+      status: SESSION_STATUS.CLAIMED,
+      ridersProfile: riders,
       claimedAt: admin.firestore.FieldValue.serverTimestamp(),
-      ridersProfile: riders.map((r: any) => ({
-        ...r,
-        status: "captured",
-      })),
     });
 
     return res.json({ success: true });
@@ -205,17 +257,23 @@ app.post("/cancel-session", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    const session = snap.data()!;
+    const session: any = snap.data();
     const riders = session.ridersProfile || [];
 
     for (const rider of riders) {
-      if (rider.paymentIntentId) {
+      if (
+        rider.paymentIntentId &&
+        rider.status === RIDER_PAYMENT_STATUS.AUTHORIZED
+      ) {
         await stripe.paymentIntents.cancel(rider.paymentIntentId);
+        rider.status = RIDER_PAYMENT_STATUS.CANCELLED;
       }
     }
 
     await sessionRef.update({
-      status: "cancelled",
+      status: SESSION_STATUS.CANCELLED,
+      ridersProfile: riders,
+      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     return res.json({ success: true });
@@ -230,6 +288,7 @@ app.post("/cancel-session", async (req, res) => {
 ========================================================= */
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
