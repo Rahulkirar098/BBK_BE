@@ -76,8 +76,11 @@ app.post("/create-payment-intent", async (req, res) => {
       return res.status(400).json({ error: "Missing parameters" });
     }
 
-    const sessionRef = db.doc(`slots/${operatorUid}/slots/${sessionId}`);
+
+    const sessionRef = db.collection("slots").doc(sessionId);
     const snap = await sessionRef.get();
+
+    console.log(snap)
 
     if (!snap.exists) {
       return res.status(404).json({ error: "Session not found" });
@@ -129,7 +132,7 @@ app.post("/finalize-booking", async (req, res) => {
       return res.status(400).json({ error: "Missing parameters" });
     }
 
-    const sessionRef = db.doc(`slots/${operatorUid}/slots/${sessionId}`);
+    const sessionRef = db.collection("slots").doc(sessionId);
 
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(sessionRef);
@@ -203,7 +206,7 @@ app.post("/claim-session", async (req, res) => {
       return res.status(400).json({ error: "Missing parameters" });
     }
 
-    const sessionRef = db.doc(`slots/${operatorUid}/slots/${sessionId}`);
+    const sessionRef = db.collection("slots").doc(sessionId);
     const snap = await sessionRef.get();
 
     if (!snap.exists) {
@@ -250,7 +253,7 @@ app.post("/cancel-session", async (req, res) => {
   try {
     const { sessionId, operatorUid } = req.body;
 
-    const sessionRef = db.doc(`slots/${operatorUid}/slots/${sessionId}`);
+    const sessionRef = db.collection("slots").doc(sessionId);
     const snap = await sessionRef.get();
 
     if (!snap.exists) {
@@ -282,6 +285,110 @@ app.post("/cancel-session", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+app.post("/create-connect-account", async (req, res) => {
+  try {
+    const { operatorUid, email } = req.body;
+
+    if (!operatorUid || !email) {
+      return res.status(400).json({ error: "Missing parameters" });
+    }
+
+    const operatorRef = db.doc(`users/${operatorUid}`);
+    const snap = await operatorRef.get();
+
+    // If already created
+    if (snap.exists && snap.data()?.stripeAccountId) {
+      return res.json({
+        stripeAccountId: snap.data()?.stripeAccountId,
+      });
+    }
+
+    const account = await stripe.accounts.create({
+      type: "express",
+      country:"AE",
+      email
+    });
+
+    await operatorRef.set(
+      {
+        stripeAccountId: account.id,
+        onboardingComplete: false,
+      },
+      { merge: true }
+    );
+
+    return res.json({
+      stripeAccountId: account.id,
+    });
+  } catch (err: any) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/create-account-link", async (req, res) => {
+  try {
+    const { operatorUid } = req.body;
+
+    const operatorRef = db.doc(`users/${operatorUid}`);
+    const snap = await operatorRef.get();
+
+    if (!snap.exists || !snap.data()?.stripeAccountId) {
+      return res.status(400).json({ error: "Connect account not found" });
+    }
+
+    const accountLink = await stripe.accountLinks.create({
+      account: snap.data()?.stripeAccountId,
+      refresh_url: "https://yourapp.com/onboarding/refresh",
+      return_url: "https://yourapp.com/onboarding/complete",
+      type: "account_onboarding",
+    });
+
+    return res.json({
+      url: accountLink.url,
+    });
+  } catch (err: any) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
+  try {
+    const { operatorUid } = req.params;
+
+    const operatorRef = db.doc(`users/${operatorUid}`);
+    const snap = await operatorRef.get();
+
+    if (!snap.exists || !snap.data()?.stripeAccountId) {
+      return res.status(400).json({ error: "Account not found" });
+    }
+
+    const account = await stripe.accounts.retrieve(
+      snap.data()?.stripeAccountId
+    );
+
+    const isComplete =
+      account.details_submitted &&
+      account.charges_enabled &&
+      account.payouts_enabled;
+
+    await operatorRef.update({
+      onboardingComplete: isComplete,
+    });
+
+    return res.json({
+      onboardingComplete: isComplete,
+    });
+  } catch (err: any) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 /* =========================================================
    SERVER
