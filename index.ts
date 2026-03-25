@@ -64,6 +64,12 @@ const canClaim = (status: SessionStatus) => {
   );
 };
 
+//////////////
+
+app.get('/', (req, res) => {
+    res.send('Welcome to the API!...');
+});
+
 /* =========================================================
    1️⃣ CREATE PAYMENT INTENT (HOLD FUNDS)
 ========================================================= */
@@ -316,7 +322,7 @@ app.post("/create-connect-account", async (req, res) => {
       },
     });
 
-    console.log(account,"===@@@")
+    console.log(account, "===@@@")
 
     await operatorRef.set(
       {
@@ -331,7 +337,7 @@ app.post("/create-connect-account", async (req, res) => {
     });
   } catch (err: any) {
     console.error(err);
-    return res.status(500).json({ error:`Hello ${err.message}` });
+    return res.status(500).json({ error: `Hello ${err.message}` });
   }
 });
 
