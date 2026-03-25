@@ -290,6 +290,8 @@ app.post("/create-connect-account", async (req, res) => {
   try {
     const { operatorUid, email } = req.body;
 
+    console.log(operatorUid, email)
+
     if (!operatorUid || !email) {
       return res.status(400).json({ error: "Missing parameters" });
     }
@@ -306,9 +308,15 @@ app.post("/create-connect-account", async (req, res) => {
 
     const account = await stripe.accounts.create({
       type: "express",
-      country:"AE",
-      email
+      country: "AE",
+      email,
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
     });
+
+    console.log(account,"===@@@")
 
     await operatorRef.set(
       {
@@ -323,7 +331,7 @@ app.post("/create-connect-account", async (req, res) => {
     });
   } catch (err: any) {
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error:`Hello ${err.message}` });
   }
 });
 
