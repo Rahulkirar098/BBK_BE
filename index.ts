@@ -64,9 +64,7 @@ const canClaim = (status: SessionStatus) => {
   );
 };
 
-/* =========================================================
-   0️⃣ HEALTH CHECK
-========================================================= */
+//////////////
 
 app.get('/', (req, res) => {
     res.send('Welcome to the API!...');
@@ -360,8 +358,6 @@ app.post("/create-account-link", async (req, res) => {
       type: "account_onboarding",
     });
 
-    console.log(accountLink);
-
     return res.json({
       url: accountLink.url,
     });
@@ -370,6 +366,7 @@ app.post("/create-account-link", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
 
 app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
   try {
@@ -403,6 +400,8 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+
 
 /* =========================================================
    SERVER
