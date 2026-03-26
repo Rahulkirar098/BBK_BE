@@ -360,6 +360,8 @@ app.post("/create-account-link", async (req, res) => {
       type: "account_onboarding",
     });
 
+    console.log(accountLink);
+
     return res.json({
       url: accountLink.url,
     });
