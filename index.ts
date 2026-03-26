@@ -4,10 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import admin from "firebase-admin";
 
-// Only load dotenv in development, not in Vercel production
-if (process.env.NODE_ENV !== 'production') {
-  dotenv.config();
-}
+dotenv.config();
 
 /* =========================================================
    TYPES
@@ -37,14 +34,7 @@ export type RiderPaymentStatus =
    INIT
 ========================================================= */
 
-// Initialize Firebase with environment variable or file
-if (process.env.FIREBASE_CREDENTIALS) {
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_CREDENTIALS))
-  });
-} else {
-  admin.initializeApp();
-}
+admin.initializeApp();
 
 const app = express();
 app.use(cors());
@@ -414,13 +404,8 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
    SERVER
 ========================================================= */
 
-// For Vercel serverless deployment
-export default app;
+const PORT = process.env.PORT || 3000;
 
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-  });
-}
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
