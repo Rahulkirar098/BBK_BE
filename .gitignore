@@ -5,7 +5,7 @@ yarn-debug.log*
 yarn-error.log*
 
 # Firebase service account keys
-# *.json
+*.json
 !package.json
 !package-lock.json
 !tsconfig.json
