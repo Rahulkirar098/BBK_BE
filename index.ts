@@ -4,7 +4,10 @@ import cors from "cors";
 import dotenv from "dotenv";
 import admin from "firebase-admin";
 
-dotenv.config();
+// Only load dotenv in development, not in Vercel production
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config();
+}
 
 /* =========================================================
    TYPES
