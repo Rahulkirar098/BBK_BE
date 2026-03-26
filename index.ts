@@ -37,7 +37,14 @@ export type RiderPaymentStatus =
    INIT
 ========================================================= */
 
-admin.initializeApp();
+// Initialize Firebase with environment variable or file
+if (process.env.FIREBASE_CREDENTIALS) {
+  admin.initializeApp({
+    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_CREDENTIALS))
+  });
+} else {
+  admin.initializeApp();
+}
 
 const app = express();
 app.use(cors());
