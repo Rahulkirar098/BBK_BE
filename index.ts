@@ -34,13 +34,15 @@ export type RiderPaymentStatus =
    INIT
 ========================================================= */
 
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-  }),
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    }),
+  });
+}
 
 const app = express();
 app.use(cors());
@@ -73,7 +75,7 @@ const canClaim = (status: SessionStatus) => {
 //////////////
 
 app.get('/', (req, res) => {
-    res.send('Welcome to the API!...');
+  res.send('Welcome to the API!...');
 });
 
 /* =========================================================
@@ -415,6 +417,14 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+// ✅ Local
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`🚀 Local server running on port ${PORT}`);
+  });
+}
+
+// ✅ Vercel
+export default function handler(req: any, res: any) {
+  return app(req, res);
+}
