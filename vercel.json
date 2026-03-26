@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "framework": null,
+  "buildCommand": "npm install",
+  "outputDirectory": ".",
+  "installCommand": "npm install",
+  "devCommand": "npm run dev",
+  "builds": [
+    {
+      "src": "index.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "index.ts"
+    }
+  ],
+  "functions": {
+    "index.ts": {
+      "maxDuration": 30
+    }
+  }
+}
