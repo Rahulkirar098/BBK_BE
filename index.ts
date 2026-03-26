@@ -322,7 +322,6 @@ app.post("/create-connect-account", async (req, res) => {
       },
     });
 
-    console.log(account, "===@@@")
 
     await operatorRef.set(
       {
@@ -368,7 +367,6 @@ app.post("/create-account-link", async (req, res) => {
   }
 });
 
-
 app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
   try {
     const { operatorUid } = req.params;
@@ -401,8 +399,6 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-
-
 
 /* =========================================================
    SERVER
