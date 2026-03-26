@@ -40,7 +40,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const stripe = new Stripe("sk_test_51T2AW6HagByj0s608Pgzw0zd9Y4waP573rkSxkdIxOI02r0fhYmqncKyW4ujnVYH097KoRWSFLNvp4qoJ0LUIinI00BGLnRImz", {
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2026-01-28.clover",
 });
 
