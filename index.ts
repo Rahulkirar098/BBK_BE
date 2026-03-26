@@ -4,10 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import admin from "firebase-admin";
 
-// Only load dotenv in development, not in Vercel production
-if (process.env.NODE_ENV !== 'production') {
-  dotenv.config();
-}
+dotenv.config();
 
 /* =========================================================
    TYPES
@@ -43,15 +40,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Debug environment variables
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
-
-if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error('STRIPE_SECRET_KEY environment variable is not set');
-}
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+const stripe = new Stripe("sk_test_51T2AW6HagByj0s608Pgzw0zd9Y4waP573rkSxkdIxOI02r0fhYmqncKyW4ujnVYH097KoRWSFLNvp4qoJ0LUIinI00BGLnRImz", {
   apiVersion: "2026-01-28.clover",
 });
 
@@ -75,11 +64,10 @@ const canClaim = (status: SessionStatus) => {
   );
 };
 
-/* =========================================================
-   START SERVER
-========================================================= */
+//////////////
+
 app.get('/', (req, res) => {
-  res.send('Welcome to the API!...');
+    res.send('Welcome to the API!...');
 });
 
 /* =========================================================
@@ -416,13 +404,8 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
    SERVER
 ========================================================= */
 
-// For Vercel serverless deployment
-export default app;
+const PORT = process.env.PORT || 3000;
 
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-  });
-}
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
