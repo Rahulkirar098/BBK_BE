@@ -90,17 +90,15 @@ app.post("/create-payment-intent", async (req, res) => {
       return res.status(400).json({ error: "Missing parameters" });
     }
 
-
     const sessionRef = db.collection("slots").doc(sessionId);
     const snap = await sessionRef.get();
-
-    console.log(snap)
 
     if (!snap.exists) {
       return res.status(404).json({ error: "Session not found" });
     }
 
     const session: any = snap.data();
+
     const status: SessionStatus =
       session.status || SESSION_STATUS.OPEN;
 
@@ -147,15 +145,24 @@ app.post("/finalize-booking", async (req, res) => {
     }
 
     const sessionRef = db.collection("slots").doc(sessionId);
+    const riderRef = db.collection("users").doc(riderUid);
+
+    const bookingRef = sessionRef
+      .collection("booking")
+      .doc(riderUid); // 👈 deterministic
+
+    const historyRef = riderRef
+      .collection("history")
+      .doc(sessionId); // 👈 deterministic
 
     await db.runTransaction(async (tx) => {
-      const snap = await tx.get(sessionRef);
-
-      if (!snap.exists) {
+      // 🔥 Get session
+      const sessionSnap = await tx.get(sessionRef);
+      if (!sessionSnap.exists) {
         throw new Error("Session not found");
       }
 
-      const session: any = snap.data();
+      const session: any = sessionSnap.data();
       const status: SessionStatus =
         session.status || SESSION_STATUS.OPEN;
 
@@ -167,24 +174,48 @@ app.post("/finalize-booking", async (req, res) => {
         throw new Error("Session full");
       }
 
-      const alreadyBooked = session.ridersProfile?.some(
-        (r: any) => r.uid === riderUid
-      );
-
-      if (alreadyBooked) {
+      // 🔥 Prevent duplicate booking
+      const existingBooking = await tx.get(bookingRef);
+      if (existingBooking.exists) {
         throw new Error("Already booked");
       }
 
-      const newBookedSeats = session.bookedSeats + 1;
+      // 🔥 Fetch rider
+      const riderSnap = await tx.get(riderRef);
+      if (!riderSnap.exists) {
+        throw new Error("Rider not found");
+      }
 
-      const updatedRiders = [
-        ...(session.ridersProfile || []),
-        {
-          uid: riderUid,
-          paymentIntentId,
-          status: RIDER_PAYMENT_STATUS.AUTHORIZED,
-        },
-      ];
+      const rider = riderSnap.data() as any;
+
+      // 🔥 Minimal rider snapshot (IMPORTANT)
+      const riderData = {
+        name: rider.name,
+        phone: rider.phone,
+        photoURL: rider.photoURL || null,
+      };
+
+      // 🔥 Create booking (session side)
+      tx.set(bookingRef, {
+        riderUid,
+        ...riderData,
+        paymentIntentId,
+        status: RIDER_PAYMENT_STATUS.AUTHORIZED,
+        createdAt: new Date(),
+      });
+
+      // 🔥 Create history (rider side)
+      tx.set(historyRef, {
+        sessionId,
+        operatorUid,
+        paymentIntentId,
+        status: RIDER_PAYMENT_STATUS.AUTHORIZED,
+        sessionDate: session.date || null,
+        createdAt: new Date(),
+      });
+
+      // 🔥 Update session counters
+      const newBookedSeats = session.bookedSeats + 1;
 
       let newStatus: SessionStatus = SESSION_STATUS.OPEN;
 
@@ -196,7 +227,6 @@ app.post("/finalize-booking", async (req, res) => {
 
       tx.update(sessionRef, {
         bookedSeats: newBookedSeats,
-        ridersProfile: updatedRiders,
         status: newStatus,
       });
     });
@@ -304,8 +334,6 @@ app.post("/create-connect-account", async (req, res) => {
   try {
     const { operatorUid, email } = req.body;
 
-    console.log(operatorUid, email)
-
     if (!operatorUid || !email) {
       return res.status(400).json({ error: "Missing parameters" });
     }
@@ -361,8 +389,8 @@ app.post("/create-account-link", async (req, res) => {
 
     const accountLink = await stripe.accountLinks.create({
       account: snap.data()?.stripeAccountId,
-      refresh_url: "https://yourapp.com/onboarding/refresh",
-      return_url: "https://yourapp.com/onboarding/complete",
+      refresh_url: "https://bbk-be-1smn.vercel.app/reauth",
+      return_url: "https://bbk-be-1smn.vercel.app/success",
       type: "account_onboarding",
     });
 
@@ -375,6 +403,13 @@ app.post("/create-account-link", async (req, res) => {
   }
 });
 
+app.get("/reauth", (req, res) => {
+  res.send("Re-auth required. Please try onboarding again.");
+});
+
+app.get("/success", (req, res) => {
+  res.send("Onboarding completed successfully ✅");
+});
 
 app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
   try {
@@ -408,8 +443,6 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-
-
 
 /* =========================================================
    SERVER
