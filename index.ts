@@ -84,9 +84,9 @@ app.get('/', (req, res) => {
 
 app.post("/create-payment-intent", async (req, res) => {
   try {
-    const { sessionId, operatorUid, riderUid } = req.body;
+    const { sessionId, operatorUid, riderUid, operatorStripeAccountId } = req.body;
 
-    if (!sessionId || !operatorUid || !riderUid) {
+    if (!sessionId || !operatorUid || !riderUid || !operatorStripeAccountId) {
       return res.status(400).json({ error: "Missing parameters" });
     }
 
@@ -114,6 +114,10 @@ app.post("/create-payment-intent", async (req, res) => {
       amount: session.pricePerSeat * 100,
       currency: "aed",
       capture_method: "manual",
+
+      transfer_data: {
+        destination: operatorStripeAccountId,
+      },
       metadata: {
         sessionId,
         operatorUid,
@@ -331,6 +335,9 @@ app.post("/cancel-session", async (req, res) => {
   }
 });
 
+/* =========================================================
+   5️⃣ CREATE ACCOUNT LINK
+========================================================= */
 app.post("/create-connect-account", async (req, res) => {
   try {
     const { operatorUid, email } = req.body;
