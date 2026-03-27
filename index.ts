@@ -190,9 +190,10 @@ app.post("/finalize-booking", async (req, res) => {
 
       // 🔥 Minimal rider snapshot (IMPORTANT)
       const riderData = {
-        name: rider.name,
-        phone: rider.phone,
-        photoURL: rider.photoURL || null,
+        name: rider.userProfile?.name ?? rider.displayName ?? null,
+        phone: rider.userProfile?.phone_no ?? null,
+        photoURL: rider.photoURL ?? null,
+        email: rider.email ?? null,
       };
 
       // 🔥 Create booking (session side)
