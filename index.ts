@@ -22,9 +22,9 @@ export type SessionStatus =
   typeof SESSION_STATUS[keyof typeof SESSION_STATUS];
 
 export const RIDER_PAYMENT_STATUS = {
-  AUTHORIZED: "authorized",
-  CAPTURED: "captured",
-  CANCELLED: "cancelled",
+  AUTHORIZED: "authorized", // hold
+  CAPTURED: "captured",     // success
+  CANCELLED: "cancelled",   // released
 } as const;
 
 export type RiderPaymentStatus =
@@ -114,16 +114,16 @@ app.post("/create-payment-intent", async (req, res) => {
       amount: session.pricePerSeat * 100,
       currency: "aed",
       capture_method: "manual",
-
-      transfer_data: {
-        destination: operatorStripeAccountId,
-      },
       metadata: {
         sessionId,
         operatorUid,
         riderUid,
       },
-    });
+    },
+      {
+        stripeAccount: operatorStripeAccountId,
+      }
+    );
 
     return res.json({
       paymentIntentId: paymentIntent.id,
@@ -244,99 +244,7 @@ app.post("/finalize-booking", async (req, res) => {
 });
 
 /* =========================================================
-   3️⃣ OPERATOR CLAIM (CAPTURE FUNDS)
-========================================================= */
-
-app.post("/claim-session", async (req, res) => {
-  try {
-    const { sessionId, operatorUid } = req.body;
-
-    if (!sessionId || !operatorUid) {
-      return res.status(400).json({ error: "Missing parameters" });
-    }
-
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const snap = await sessionRef.get();
-
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-
-    const session: any = snap.data();
-    const status: SessionStatus = session.status;
-
-    if (!canClaim(status)) {
-      return res.status(400).json({ error: "Not ready to claim" });
-    }
-
-    const riders = session.ridersProfile || [];
-
-    for (const rider of riders) {
-      if (
-        rider.paymentIntentId &&
-        rider.status === RIDER_PAYMENT_STATUS.AUTHORIZED
-      ) {
-        await stripe.paymentIntents.capture(rider.paymentIntentId);
-        rider.status = RIDER_PAYMENT_STATUS.CAPTURED;
-      }
-    }
-
-    await sessionRef.update({
-      status: SESSION_STATUS.CLAIMED,
-      ridersProfile: riders,
-      claimedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.json({ success: true });
-  } catch (err: any) {
-    console.error("Claim error:", err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-/* =========================================================
-   4️⃣ CANCEL SESSION (RELEASE HOLDS)
-========================================================= */
-
-app.post("/cancel-session", async (req, res) => {
-  try {
-    const { sessionId, operatorUid } = req.body;
-
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const snap = await sessionRef.get();
-
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-
-    const session: any = snap.data();
-    const riders = session.ridersProfile || [];
-
-    for (const rider of riders) {
-      if (
-        rider.paymentIntentId &&
-        rider.status === RIDER_PAYMENT_STATUS.AUTHORIZED
-      ) {
-        await stripe.paymentIntents.cancel(rider.paymentIntentId);
-        rider.status = RIDER_PAYMENT_STATUS.CANCELLED;
-      }
-    }
-
-    await sessionRef.update({
-      status: SESSION_STATUS.CANCELLED,
-      ridersProfile: riders,
-      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.json({ success: true });
-  } catch (err: any) {
-    console.error("Cancel error:", err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-/* =========================================================
-   5️⃣ CREATE ACCOUNT LINK
+    CONNECT ACCOUNT 
 ========================================================= */
 app.post("/create-connect-account", async (req, res) => {
   try {
@@ -443,7 +351,7 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
       onboardingComplete: isComplete,
     });
 
-    return res.json({
+    return res.status(200).json({
       onboardingComplete: isComplete,
     });
   } catch (err: any) {
@@ -453,8 +361,253 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
 });
 
 /* =========================================================
+   CAPTURE AMOUNT
+========================================================= */
+
+app.post("/capture-payment", async (req, res) => {
+  try {
+    const { sessionId, riderUid } = req.body;
+
+    if (!sessionId || !riderUid) {
+      return res.status(400).json({ error: "Missing parameters" });
+    }
+
+    const sessionRef = db.collection("slots").doc(sessionId);
+    const bookingRef = sessionRef.collection("booking").doc(riderUid);
+
+    const sessionSnap = await sessionRef.get();
+    if (!sessionSnap.exists) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    const session = sessionSnap.data();
+    const operatorStripeAccountId = session?.stripeAccountId;
+
+    if (!operatorStripeAccountId) {
+      return res.status(400).json({ error: "Missing Stripe account" });
+    }
+
+    const bookingSnap = await bookingRef.get();
+    if (!bookingSnap.exists) {
+      return res.status(404).json({ error: "Booking not found" });
+    }
+
+    const booking: any = bookingSnap.data();
+
+    if (booking.status === "captured") {
+      return res.status(400).json({ error: "Already captured" });
+    }
+
+    if (!booking.paymentIntentId) {
+      return res.status(400).json({ error: "Missing paymentIntentId" });
+    }
+
+    // 🔥 CAPTURE PAYMENT
+    await stripe.paymentIntents.capture(
+      booking.paymentIntentId,
+      {},
+      {
+        stripeAccount: operatorStripeAccountId,
+      }
+    );
+
+    // ✅ Update booking status
+    await bookingRef.update({
+      status: "captured",
+      capturedAt: new Date(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment captured successfully",
+    });
+  } catch (err: any) {
+    console.error("Capture error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================================================
+ CAPTURE All AMOUNT
+========================================================= */
+
+app.post("/capture-all", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+
+    const sessionRef = db.collection("slots").doc(sessionId);
+    const sessionSnap = await sessionRef.get();
+
+    if (!sessionSnap.exists) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    const operatorStripeAccountId = sessionSnap.data()?.stripeAccountId;
+
+    const bookingsSnap = await sessionRef.collection("booking").get();
+
+    const captured = [];
+    const failed = [];
+
+    // 🔥 STEP 1: Try capturing all
+    for (const doc of bookingsSnap.docs) {
+      const booking = doc.data();
+
+      if (booking.status !== "authorized") continue;
+
+      try {
+        await stripe.paymentIntents.capture(
+          booking.paymentIntentId,
+          {},
+          {
+            stripeAccount: operatorStripeAccountId,
+          }
+        );
+
+        await doc.ref.update({
+          status: "captured",
+          capturedAt: new Date(),
+        });
+
+        captured.push(doc.id);
+
+      } catch (err:any) {
+        console.error("Capture failed:", booking.paymentIntentId, err.message);
+
+        failed.push({
+          riderUid: doc.id,
+          paymentIntentId: booking.paymentIntentId,
+        });
+      }
+    }
+
+    // 🔥 STEP 2: Handle failure → cancel remaining
+    if (failed.length > 0) {
+      for (const doc of bookingsSnap.docs) {
+        const booking = doc.data();
+
+        if (booking.status !== "authorized") continue;
+
+        try {
+          await stripe.paymentIntents.cancel(
+            booking.paymentIntentId,
+            {
+              stripeAccount: operatorStripeAccountId,
+            }
+          );
+
+          await doc.ref.update({
+            status: "cancelled",
+            cancelledAt: new Date(),
+          });
+
+        } catch (err:any) {
+          console.error("Cancel failed:", booking.paymentIntentId, err.message);
+        }
+      }
+
+      // ❌ Update session status (FAILED / PARTIAL)
+      await sessionRef.update({
+        paymentStatus: "failed", // or "partial"
+        updatedAt: new Date(),
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Some payments failed. Remaining payments cancelled.",
+        captured,
+        failed,
+      });
+    }
+
+    // ✅ STEP 3: All captured → update session
+    await sessionRef.update({
+      paymentStatus: "captured",
+      updatedAt: new Date(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "All payments captured successfully",
+      captured,
+    });
+
+  } catch (err:any) {
+    console.error("Capture-all error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================================================
+   CANCEL AMOUNT
+========================================================= */
+
+app.post("/cancel-payment", async (req, res) => {
+  try {
+    const { sessionId, riderUid } = req.body;
+
+    if (!sessionId || !riderUid) {
+      return res.status(400).json({ error: "Missing parameters" });
+    }
+
+    const sessionRef = db.collection("slots").doc(sessionId);
+    const bookingRef = sessionRef.collection("booking").doc(riderUid);
+
+    const sessionSnap = await sessionRef.get();
+    if (!sessionSnap.exists) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    const session = sessionSnap.data();
+    const operatorStripeAccountId = session?.stripeAccountId;
+
+    if (!operatorStripeAccountId) {
+      return res.status(400).json({ error: "Missing Stripe account" });
+    }
+
+    const bookingSnap = await bookingRef.get();
+    if (!bookingSnap.exists) {
+      return res.status(404).json({ error: "Booking not found" });
+    }
+
+    const booking: any = bookingSnap.data();
+
+    if (booking.status === "cancelled") {
+      return res.status(400).json({ error: "Already cancelled" });
+    }
+
+    if (!booking.paymentIntentId) {
+      return res.status(400).json({ error: "Missing paymentIntentId" });
+    }
+
+    // 🔥 CANCEL PAYMENT (release hold)
+    await stripe.paymentIntents.cancel(
+      booking.paymentIntentId,
+      {
+        stripeAccount: operatorStripeAccountId,
+      }
+    );
+
+    // ✅ Update booking status
+    await bookingRef.update({
+      status: "cancelled",
+      cancelledAt: new Date(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment cancelled successfully",
+    });
+  } catch (err: any) {
+    console.error("Cancel error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================================================
    SERVER
 ========================================================= */
+
 
 const PORT = process.env.PORT || 3000;
 
