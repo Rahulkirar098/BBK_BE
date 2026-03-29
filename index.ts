@@ -151,6 +151,7 @@ app.post("/finalize-booking", async (req, res) => {
     const sessionRef = db.collection("slots").doc(sessionId);
     const riderRef = db.collection("users").doc(riderUid);
 
+    // ✅ FIXED collection name
     const bookingRef = sessionRef
       .collection("booking")
       .doc(riderUid); // 👈 deterministic
@@ -167,10 +168,14 @@ app.post("/finalize-booking", async (req, res) => {
       }
 
       const session: any = sessionSnap.data();
-      const status: SessionStatus =
+      const currentStatus: SessionStatus =
         session.status || SESSION_STATUS.OPEN;
 
-      if (isFinalStatus(status)) {
+      // ❌ BLOCK invalid states
+      if (
+        currentStatus === SESSION_STATUS.CANCELLED ||
+        currentStatus === SESSION_STATUS.CLAIMED
+      ) {
         throw new Error("Session not bookable");
       }
 
@@ -206,7 +211,7 @@ app.post("/finalize-booking", async (req, res) => {
         ...riderData,
         paymentIntentId,
         status: RIDER_PAYMENT_STATUS.AUTHORIZED,
-        createdAt: new Date(),
+        createdAt: new Date(), // you can switch to Timestamp
       });
 
       // 🔥 Create history (rider side)
@@ -219,17 +224,22 @@ app.post("/finalize-booking", async (req, res) => {
         createdAt: new Date(),
       });
 
-      // 🔥 Update session counters
+      // 🔥 Calculate new seats
       const newBookedSeats = session.bookedSeats + 1;
 
-      let newStatus: SessionStatus = SESSION_STATUS.OPEN;
+      // 🔥 SAFE STATUS TRANSITION (NO DOWNGRADE)
+      let newStatus: SessionStatus = currentStatus;
 
       if (newBookedSeats >= session.totalSeats) {
         newStatus = SESSION_STATUS.FULL;
-      } else if (newBookedSeats >= session.minRidersToConfirm) {
+      } else if (
+        newBookedSeats >= session.minRidersToConfirm &&
+        currentStatus === SESSION_STATUS.OPEN
+      ) {
         newStatus = SESSION_STATUS.MIN_REACHED;
       }
 
+      // 🔥 Update session
       tx.update(sessionRef, {
         bookedSeats: newBookedSeats,
         status: newStatus,
@@ -471,7 +481,7 @@ app.post("/capture-all", async (req, res) => {
 
         captured.push(doc.id);
 
-      } catch (err:any) {
+      } catch (err: any) {
         console.error("Capture failed:", booking.paymentIntentId, err.message);
 
         failed.push({
@@ -501,7 +511,7 @@ app.post("/capture-all", async (req, res) => {
             cancelledAt: new Date(),
           });
 
-        } catch (err:any) {
+        } catch (err: any) {
           console.error("Cancel failed:", booking.paymentIntentId, err.message);
         }
       }
@@ -532,7 +542,7 @@ app.post("/capture-all", async (req, res) => {
       captured,
     });
 
-  } catch (err:any) {
+  } catch (err: any) {
     console.error("Capture-all error:", err);
     return res.status(500).json({ error: err.message });
   }
