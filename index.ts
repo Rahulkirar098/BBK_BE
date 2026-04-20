@@ -156,9 +156,8 @@ app.post("/finalize-booking", async (req, res) => {
       .collection("booking")
       .doc(riderUid); // 👈 deterministic
 
-    const historyRef = riderRef
-      .collection("history")
-      .doc(sessionId); // 👈 deterministic
+    // ✅ NEW global booking collection
+    const bookingGlobalRef = db.collection("bookings").doc();
 
     await db.runTransaction(async (tx) => {
       // 🔥 Get session
@@ -214,13 +213,46 @@ app.post("/finalize-booking", async (req, res) => {
         createdAt: new Date(), // you can switch to Timestamp
       });
 
-      // 🔥 Create history (rider side)
-      tx.set(historyRef, {
-        sessionId,
-        operatorUid,
+
+      // 🔥 GLOBAL booking (NEW)
+      tx.set(bookingGlobalRef, {
+        // 🔗 relations
+        riderId: riderUid,
+        operatorId: operatorUid,
+        slotId: sessionId,
+
+        // 👤 rider snapshot
+        rider: riderData,
+
+        // 📦 session snapshot
+        title: session.title,
+        activity: session.activity,
+        timeStart: session.timeStart,
+        durationMinutes: session.durationMinutes,
+
+        location: session.location,
+        locationDetails: session.locationDetails,
+
+        boat: session.boat,
+        captain: session.captain,
+        operator: session.operator,
+
+        // 💰 pricing
+        pricePerSeat: session.pricePerSeat,
+        currency: session.currency,
+
+        // 👥 booking
+        seatsBooked: 1,
+        totalAmount: session.pricePerSeat,
+
+        // 💳 payment (AUTH HOLD)
         paymentIntentId,
-        status: RIDER_PAYMENT_STATUS.AUTHORIZED,
-        sessionDate: session.date || null,
+        paymentStatus: "authorized",
+        captureStatus: "pending",
+
+        // 📊 status
+        status: "booked",
+
         createdAt: new Date(),
       });
 
