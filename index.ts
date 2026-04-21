@@ -138,7 +138,6 @@ app.post("/create-payment-intent", async (req, res) => {
 /* =========================================================
    2️⃣ FINALIZE BOOKING
 ========================================================= */
-
 app.post("/finalize-booking", async (req, res) => {
   try {
     const { sessionId, operatorUid, riderUid, paymentIntentId } =
@@ -151,31 +150,57 @@ app.post("/finalize-booking", async (req, res) => {
     const sessionRef = db.collection("slots").doc(sessionId);
     const riderRef = db.collection("users").doc(riderUid);
 
-    // ✅ FIXED collection name
     const bookingRef = sessionRef
       .collection("booking")
-      .doc(riderUid); // 👈 deterministic
+      .doc(riderUid);
 
-    // ✅ NEW global booking collection
     const bookingGlobalRef = db.collection("bookings").doc();
 
     // 🔥 Chat refs
     const chatRef = db.collection("chats").doc(sessionId);
     const membersRef = chatRef.collection("members");
-    const messagesRef = chatRef.collection("messages").doc();
+    const messageRef = chatRef.collection("messages").doc();
 
     await db.runTransaction(async (tx) => {
-      // 🔥 Get session
+      /* =========================================================
+         🔥 STEP 1: ALL READS FIRST (VERY IMPORTANT)
+      ========================================================= */
+
       const sessionSnap = await tx.get(sessionRef);
       if (!sessionSnap.exists) {
         throw new Error("Session not found");
       }
 
-      const session: any = sessionSnap.data();
-      const currentStatus: SessionStatus =
+      const riderSnap = await tx.get(riderRef);
+      if (!riderSnap.exists) {
+        throw new Error("Rider not found");
+      }
+
+      const existingBooking = await tx.get(bookingRef);
+      if (existingBooking.exists) {
+        throw new Error("Already booked");
+      }
+
+      const chatSnap = await tx.get(chatRef); // ✅ moved BEFORE writes
+
+      /* =========================================================
+         🔥 STEP 2: PREP DATA
+      ========================================================= */
+
+      const session :any= sessionSnap.data();
+      const rider :any= riderSnap.data();
+
+      const riderData = {
+        name: rider.userProfile?.name ?? rider.displayName ?? null,
+        phone: rider.userProfile?.phone_no ?? null,
+        photoURL: rider.photoURL ?? null,
+        email: rider.email ?? null,
+      };
+
+      const currentStatus =
         session.status || SESSION_STATUS.OPEN;
 
-      /* ---------------- VALIDATIONS ---------------- */
+      // ❌ Block invalid states
       if (
         currentStatus === SESSION_STATUS.CANCELLED ||
         currentStatus === SESSION_STATUS.CLAIMED
@@ -187,39 +212,34 @@ app.post("/finalize-booking", async (req, res) => {
         throw new Error("Session full");
       }
 
-      /* ---------------- DUPLICATE CHECK ---------------- */
-      const existingBooking = await tx.get(bookingRef);
-      if (existingBooking.exists) {
-        throw new Error("Already booked");
+      const newBookedSeats = session.bookedSeats + 1;
+
+      let newStatus = currentStatus;
+
+      if (newBookedSeats >= session.totalSeats) {
+        newStatus = SESSION_STATUS.FULL;
+      } else if (
+        newBookedSeats >= session.minRidersToConfirm &&
+        currentStatus === SESSION_STATUS.OPEN
+      ) {
+        newStatus = SESSION_STATUS.MIN_REACHED;
       }
 
-      /* ---------------- GET RIDER ---------------- */
-      const riderSnap = await tx.get(riderRef);
-      if (!riderSnap.exists) {
-        throw new Error("Rider not found");
-      }
+      /* =========================================================
+         🔥 STEP 3: WRITES START HERE
+      ========================================================= */
 
-      const rider = riderSnap.data() as any;
-
-      // 🔥 Minimal rider snapshot (IMPORTANT)
-      const riderData = {
-        name: rider.userProfile?.name ?? rider.displayName ?? null,
-        phone: rider.userProfile?.phone_no ?? null,
-        photoURL: rider.photoURL ?? null,
-        email: rider.email ?? null,
-      };
-
-      /* ---------------- CREATE SESSION BOOKING ---------------- */
+      // ✅ Session-level booking
       tx.set(bookingRef, {
         riderUid,
         ...riderData,
         paymentIntentId,
-        globalBookingId: bookingGlobalRef.id, // 🔥 IMPORTANT LINK
+        globalBookingId: bookingGlobalRef.id,
         status: RIDER_PAYMENT_STATUS.AUTHORIZED,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      /* ---------------- CREATE GLOBAL BOOKING ---------------- */
+      // ✅ Global booking
       tx.set(bookingGlobalRef, {
         // relations
         riderId: riderUid,
@@ -261,40 +281,24 @@ app.post("/finalize-booking", async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // 🔥 Calculate new seats
-      const newBookedSeats = session.bookedSeats + 1;
-
-      // 🔥 SAFE STATUS TRANSITION (NO DOWNGRADE)
-      let newStatus: SessionStatus = currentStatus;
-
-      if (newBookedSeats >= session.totalSeats) {
-        newStatus = SESSION_STATUS.FULL;
-      } else if (
-        newBookedSeats >= session.minRidersToConfirm &&
-        currentStatus === SESSION_STATUS.OPEN
-      ) {
-        newStatus = SESSION_STATUS.MIN_REACHED;
-      }
-
-      // 🔥 Update session
+      // ✅ Update session seats + status
       tx.update(sessionRef, {
         bookedSeats: newBookedSeats,
         status: newStatus,
       });
 
-      /* ---------------- CHAT CREATION ---------------- */
-      const chatSnap = await tx.get(chatRef);
-
+      // ✅ Create chat ONLY once
       if (!chatSnap.exists) {
         tx.set(chatRef, {
           sessionId,
           operatorId: operatorUid,
+          membersIds: [operatorUid], // initial
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           lastMessage: null,
         });
       }
 
-      /* ---------------- ADD RIDER TO CHAT ---------------- */
+      // ✅ Add rider to members
       tx.set(
         membersRef.doc(riderUid),
         {
@@ -307,7 +311,7 @@ app.post("/finalize-booking", async (req, res) => {
         { merge: true }
       );
 
-      /* ---------------- ADD OPERATOR TO CHAT ---------------- */
+      // ✅ Ensure operator in members
       tx.set(
         membersRef.doc(operatorUid),
         {
@@ -318,8 +322,17 @@ app.post("/finalize-booking", async (req, res) => {
         { merge: true }
       );
 
-      /* ---------------- SYSTEM MESSAGE ---------------- */
-      tx.set(messagesRef, {
+      // ✅ Update membersIds array (fast query)
+      tx.set(
+        chatRef,
+        {
+          membersIds: admin.firestore.FieldValue.arrayUnion(riderUid),
+        },
+        { merge: true }
+      );
+
+      // ✅ System message
+      tx.set(messageRef, {
         type: "system",
         text: `${riderData.name || "A rider"} joined the chat`,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -327,7 +340,7 @@ app.post("/finalize-booking", async (req, res) => {
     });
 
     return res.json({ success: true });
-  } catch (err: any) {
+  } catch (err :any) {
     console.error("Finalize booking error:", err);
     return res.status(400).json({ error: err.message });
   }
