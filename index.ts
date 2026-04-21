@@ -159,6 +159,11 @@ app.post("/finalize-booking", async (req, res) => {
     // ✅ NEW global booking collection
     const bookingGlobalRef = db.collection("bookings").doc();
 
+    // 🔥 Chat refs
+    const chatRef = db.collection("chats").doc(sessionId);
+    const membersRef = chatRef.collection("members");
+    const messagesRef = chatRef.collection("messages").doc();
+
     await db.runTransaction(async (tx) => {
       // 🔥 Get session
       const sessionSnap = await tx.get(sessionRef);
@@ -170,7 +175,7 @@ app.post("/finalize-booking", async (req, res) => {
       const currentStatus: SessionStatus =
         session.status || SESSION_STATUS.OPEN;
 
-      // ❌ BLOCK invalid states
+      /* ---------------- VALIDATIONS ---------------- */
       if (
         currentStatus === SESSION_STATUS.CANCELLED ||
         currentStatus === SESSION_STATUS.CLAIMED
@@ -182,13 +187,13 @@ app.post("/finalize-booking", async (req, res) => {
         throw new Error("Session full");
       }
 
-      // 🔥 Prevent duplicate booking
+      /* ---------------- DUPLICATE CHECK ---------------- */
       const existingBooking = await tx.get(bookingRef);
       if (existingBooking.exists) {
         throw new Error("Already booked");
       }
 
-      // 🔥 Fetch rider
+      /* ---------------- GET RIDER ---------------- */
       const riderSnap = await tx.get(riderRef);
       if (!riderSnap.exists) {
         throw new Error("Rider not found");
@@ -204,27 +209,27 @@ app.post("/finalize-booking", async (req, res) => {
         email: rider.email ?? null,
       };
 
-      // 🔥 Create booking (session side)
+      /* ---------------- CREATE SESSION BOOKING ---------------- */
       tx.set(bookingRef, {
         riderUid,
         ...riderData,
         paymentIntentId,
+        globalBookingId: bookingGlobalRef.id, // 🔥 IMPORTANT LINK
         status: RIDER_PAYMENT_STATUS.AUTHORIZED,
-        createdAt: new Date(), // you can switch to Timestamp
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-
-      // 🔥 GLOBAL booking (NEW)
+      /* ---------------- CREATE GLOBAL BOOKING ---------------- */
       tx.set(bookingGlobalRef, {
-        // 🔗 relations
+        // relations
         riderId: riderUid,
         operatorId: operatorUid,
         slotId: sessionId,
 
-        // 👤 rider snapshot
+        // rider snapshot
         rider: riderData,
 
-        // 📦 session snapshot
+        // session snapshot
         title: session.title,
         activity: session.activity,
         timeStart: session.timeStart,
@@ -237,23 +242,23 @@ app.post("/finalize-booking", async (req, res) => {
         captain: session.captain,
         operator: session.operator,
 
-        // 💰 pricing
+        // pricing
         pricePerSeat: session.pricePerSeat,
         currency: session.currency,
 
-        // 👥 booking
+        // booking
         seatsBooked: 1,
         totalAmount: session.pricePerSeat,
 
-        // 💳 payment (AUTH HOLD)
+        // payment
         paymentIntentId,
         paymentStatus: "authorized",
         captureStatus: "pending",
 
-        // 📊 status
+        // status
         status: "booked",
 
-        createdAt: new Date(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       // 🔥 Calculate new seats
@@ -275,6 +280,49 @@ app.post("/finalize-booking", async (req, res) => {
       tx.update(sessionRef, {
         bookedSeats: newBookedSeats,
         status: newStatus,
+      });
+
+      /* ---------------- CHAT CREATION ---------------- */
+      const chatSnap = await tx.get(chatRef);
+
+      if (!chatSnap.exists) {
+        tx.set(chatRef, {
+          sessionId,
+          operatorId: operatorUid,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastMessage: null,
+        });
+      }
+
+      /* ---------------- ADD RIDER TO CHAT ---------------- */
+      tx.set(
+        membersRef.doc(riderUid),
+        {
+          userId: riderUid,
+          role: "rider",
+          name: riderData.name,
+          photoURL: riderData.photoURL,
+          joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      /* ---------------- ADD OPERATOR TO CHAT ---------------- */
+      tx.set(
+        membersRef.doc(operatorUid),
+        {
+          userId: operatorUid,
+          role: "operator",
+          joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      /* ---------------- SYSTEM MESSAGE ---------------- */
+      tx.set(messagesRef, {
+        type: "system",
+        text: `${riderData.name || "A rider"} joined the chat`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
 
