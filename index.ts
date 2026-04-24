@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import cors from "cors";
 import dotenv from "dotenv";
 import admin from "firebase-admin";
+import { sendBookingSMS, sendPaymentConfirmationSMS } from "./twilio.js";
 
 dotenv.config();
 
@@ -209,7 +210,7 @@ app.post("/finalize-booking", async (req, res) => {
       }
 
       if (session.bookedSeats >= session.totalSeats) {
-        throw new Error("Session full");
+        throw new Error("Seats are full");
       }
 
       const newBookedSeats = session.bookedSeats + 1;
@@ -254,6 +255,7 @@ app.post("/finalize-booking", async (req, res) => {
         activity: session.activity,
         timeStart: session.timeStart,
         durationMinutes: session.durationMinutes,
+        imageUrl: session.imageUrl,
 
         location: session.location,
         locationDetails: session.locationDetails,
@@ -338,6 +340,23 @@ app.post("/finalize-booking", async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+
+    // 🚀 Send SMS notification after successful booking
+    // Re-fetch the data to get access outside transaction
+    const finalSessionSnap = await sessionRef.get();
+    const finalSession = finalSessionSnap.data() as any;
+    const finalRiderSnap = await riderRef.get();
+    const finalRider = finalRiderSnap.data() as any;
+    
+    const finalRiderData = {
+      name: finalRider.userProfile?.name ?? finalRider.displayName ?? null,
+      phone: finalRider.userProfile?.phone_no ?? null,
+    };
+
+    if (finalRiderData.phone) {
+      // Send SMS asynchronously (don't block the response)
+      sendBookingSMS(finalRiderData.phone, finalSession, finalRiderData.name || "Rider").catch(console.error);
+    }
 
     return res.json({ success: true });
   } catch (err :any) {
@@ -519,6 +538,19 @@ app.post("/capture-payment", async (req, res) => {
       status: "captured",
       capturedAt: new Date(),
     });
+
+    // 🚀 Send payment confirmation SMS
+    const riderSnap = await db.collection("users").doc(riderUid).get();
+    const rider = riderSnap.data() as any;
+    const riderData = {
+      name: rider.userProfile?.name ?? rider.displayName ?? null,
+      phone: rider.userProfile?.phone_no ?? null,
+    };
+
+    if (riderData.phone) {
+      // Send SMS asynchronously (don't block the response)
+      sendPaymentConfirmationSMS(riderData.phone, session, riderData.name || "Rider").catch(console.error);
+    }
 
     return res.status(200).json({
       success: true,

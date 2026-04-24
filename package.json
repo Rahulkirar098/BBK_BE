@@ -14,11 +14,13 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@types/twilio": "^3.19.2",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "firebase-admin": "^13.6.1",
-    "stripe": "^20.3.1"
+    "stripe": "^20.3.1",
+    "twilio": "^6.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
