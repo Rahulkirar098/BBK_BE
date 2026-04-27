@@ -3,8 +3,7 @@ import Stripe from "stripe";
 import cors from "cors";
 import dotenv from "dotenv";
 import admin from "firebase-admin";
-//@ts-ignore
-import { sendBookingSMS, sendPaymentConfirmationSMS } from "./twilio.ts";
+import { sendBookingSMS, sendPaymentConfirmationSMS } from "./twilio.js";
 
 dotenv.config();
 

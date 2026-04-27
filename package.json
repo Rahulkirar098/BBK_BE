@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.ts",
   "scripts": {
-    "start": "nodemon index.ts",
-    "dev": "nodemon index.ts",
+    "start": "nodemon --exec node --loader ts-node/esm index.ts",
+    "dev": "nodemon --exec node --loader ts-node/esm index.ts",
     "build": "echo 'No build step required for serverless'",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
