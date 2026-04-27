@@ -303,6 +303,8 @@ app.post("/finalize-booking", async (req, res) => {
         {
           userId: operatorUid,
           role: "operator",
+          name: session?.operator?.name,
+          photoURL: session?.operator?.photoURL,
           joinedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
