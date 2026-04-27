@@ -3,7 +3,8 @@ import Stripe from "stripe";
 import cors from "cors";
 import dotenv from "dotenv";
 import admin from "firebase-admin";
-import { sendBookingSMS, sendPaymentConfirmationSMS } from "./twilio";
+//@ts-ignore
+import { sendBookingSMS, sendPaymentConfirmationSMS } from "./twilio.ts";
 
 dotenv.config();
 
@@ -25,7 +26,7 @@ export type SessionStatus =
 export const RIDER_PAYMENT_STATUS = {
   AUTHORIZED: "authorized", // hold
   CAPTURED: "captured",     // success
-  CANCELLED: "cancelled",   // released
+  CANCELLED: "cancelled"   // released
 } as const;
 
 export type RiderPaymentStatus =
@@ -188,8 +189,8 @@ app.post("/finalize-booking", async (req, res) => {
          🔥 STEP 2: PREP DATA
       ========================================================= */
 
-      const session :any= sessionSnap.data();
-      const rider :any= riderSnap.data();
+      const session: any = sessionSnap.data();
+      const rider: any = riderSnap.data();
 
       const riderData = {
         name: rider.userProfile?.name ?? rider.displayName ?? null,
@@ -251,26 +252,10 @@ app.post("/finalize-booking", async (req, res) => {
         rider: riderData,
 
         // session snapshot
-        title: session.title,
-        activity: session.activity,
-        timeStart: session.timeStart,
-        durationMinutes: session.durationMinutes,
-        imageUrl: session.imageUrl,
-
-        location: session.location,
-        locationDetails: session.locationDetails,
-
-        boat: session.boat,
-        captain: session.captain,
-        operator: session.operator,
-
-        // pricing
-        pricePerSeat: session.pricePerSeat,
-        currency: session.currency,
+        ...session,
 
         // booking
         seatsBooked: 1,
-        totalAmount: session.pricePerSeat,
 
         // payment
         paymentIntentId,
@@ -347,9 +332,9 @@ app.post("/finalize-booking", async (req, res) => {
     const finalSession = finalSessionSnap.data() as any;
     const finalRiderSnap = await riderRef.get();
     const finalRider = finalRiderSnap.data() as any;
-    
+
     const finalRiderData = {
-      name: finalRider.userProfile?.name ?? finalRider.displayName ?? null,
+      name: finalRider.displayName,
       phone: finalRider.userProfile?.phone_no ?? null,
     };
 
@@ -359,7 +344,7 @@ app.post("/finalize-booking", async (req, res) => {
     }
 
     return res.json({ success: true });
-  } catch (err :any) {
+  } catch (err: any) {
     console.error("Finalize booking error:", err);
     return res.status(400).json({ error: err.message });
   }
@@ -742,6 +727,11 @@ app.post("/cancel-payment", async (req, res) => {
 /* =========================================================
    SERVER
 ========================================================= */
+
+app.get("/checkTwilo", (req, res) => {
+  sendBookingSMS("+918602926908", { activity: "Surfing", timeStart: new Date(), location: "JBR", durationMinutes: 60, pricePerSeat: 100 }, "Rahul Kirar").catch(console.error)
+  res.send({ success: true });
+});
 
 
 const PORT = process.env.PORT || 3000;
