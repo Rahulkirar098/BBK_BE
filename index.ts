@@ -213,6 +213,13 @@ app.post("/finalize-booking", async (req, res) => {
         throw new Error("Seats are full");
       }
 
+      if (
+        session.activityStatus === "started" ||
+        session.activityStatus === "ended"
+      ) {
+        throw new Error("Activity already started or ended");
+      }
+
       const newBookedSeats = session.bookedSeats + 1;
 
       let newStatus = currentStatus;
@@ -303,8 +310,8 @@ app.post("/finalize-booking", async (req, res) => {
         {
           userId: operatorUid,
           role: "operator",
-          name: session?.operator?.name,
-          photoURL: session?.operator?.photoURL,
+          name: session?.operator?.name ?? null,
+          photoURL: session?.operator?.photoURL ?? null,
           joinedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
