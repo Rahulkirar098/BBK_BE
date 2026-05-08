@@ -103,6 +103,16 @@ app.post("/create-payment-intent", async (req, res) => {
     const status: SessionStatus =
       session.status || SESSION_STATUS.OPEN;
 
+    // ❌ Block booking if activity already started/ended
+    if (
+      session.activityStatus === 'started' ||
+      session.activityStatus === 'ended'
+    ) {
+      throw new Error(
+        'Booking closed. Session already started or ended.'
+      );
+    }
+
     if (isFinalStatus(status)) {
       return res.status(400).json({ error: "Session not bookable" });
     }
@@ -201,6 +211,16 @@ app.post("/finalize-booking", async (req, res) => {
       const currentStatus =
         session.status || SESSION_STATUS.OPEN;
 
+      // ❌ Block booking if activity already started/ended
+      if (
+        session.activityStatus === 'started' ||
+        session.activityStatus === 'ended'
+      ) {
+        throw new Error(
+          'Booking closed. Session already started or ended.'
+        );
+      }
+
       // ❌ Block invalid states
       if (
         currentStatus === SESSION_STATUS.CANCELLED ||
@@ -211,13 +231,6 @@ app.post("/finalize-booking", async (req, res) => {
 
       if (session.bookedSeats >= session.totalSeats) {
         throw new Error("Seats are full");
-      }
-
-      if (
-        session.activityStatus === "started" ||
-        session.activityStatus === "ended"
-      ) {
-        throw new Error("Activity already started or ended");
       }
 
       const newBookedSeats = session.bookedSeats + 1;
