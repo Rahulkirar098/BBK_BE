@@ -87,13 +87,15 @@ const sendSMS = async (to: string, body: string) => {
 export const sendBookingSMS = async (
   phoneNumber: string,
   sessionData: any,
-  riderName: string
+  riderName: string,
+  seatsCount: number = 1
 ): Promise<void> => {
   try {
 
     console.log(phoneNumber,process.env.TWILIO_PHONE_NUMBER,riderName)
 
     const date = formatDate(sessionData.timeStart);
+    const totalAmount = sessionData.pricePerSeat * seatsCount;
 
     const message =
       `🚀 BBK Booking Confirmed!\n\n` +
@@ -106,7 +108,8 @@ export const sendBookingSMS = async (
       })}\n` +
       `Location: ${sessionData.location}\n` +
       `Duration: ${sessionData.durationMinutes} minutes\n` +
-      `Amount: AED ${sessionData.pricePerSeat}\n\n` +
+      `Seats Booked: ${seatsCount}\n` +
+      `Amount: AED ${totalAmount}\n\n` +
       `See you there! 🌊`;
 
     await sendSMS(phoneNumber, message);

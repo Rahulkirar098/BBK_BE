@@ -85,11 +85,13 @@ app.get('/', (req, res) => {
 
 app.post("/create-payment-intent", async (req, res) => {
   try {
-    const { sessionId, operatorUid, riderUid, operatorStripeAccountId } = req.body;
+    const { sessionId, operatorUid, riderUid, operatorStripeAccountId, seatsCount } = req.body;
 
     if (!sessionId || !operatorUid || !riderUid || !operatorStripeAccountId) {
       return res.status(400).json({ error: "Missing parameters" });
     }
+
+    const requestedSeats = Math.max(1, Math.min(parseInt(seatsCount) || 1, 10)); // max 10 seats per booking
 
     const sessionRef = db.collection("slots").doc(sessionId);
     const snap = await sessionRef.get();
@@ -117,18 +119,22 @@ app.post("/create-payment-intent", async (req, res) => {
       return res.status(400).json({ error: "Session not bookable" });
     }
 
-    if (session.bookedSeats >= session.totalSeats) {
-      return res.status(400).json({ error: "Session full" });
+    const availableSeats = session.totalSeats - session.bookedSeats;
+    if (requestedSeats > availableSeats) {
+      return res.status(400).json({ error: `Only ${availableSeats} seats available` });
     }
 
+    const totalAmount = session.pricePerSeat * requestedSeats * 100; // in cents
+
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: session.pricePerSeat * 100,
+      amount: totalAmount,
       currency: "aed",
       capture_method: "manual",
       metadata: {
         sessionId,
         operatorUid,
         riderUid,
+        seatsCount: requestedSeats.toString(),
       },
     },
       {
@@ -139,6 +145,8 @@ app.post("/create-payment-intent", async (req, res) => {
     return res.json({
       paymentIntentId: paymentIntent.id,
       clientSecret: paymentIntent.client_secret,
+      seatsCount: requestedSeats,
+      totalAmount: totalAmount / 100, // in AED for display
     });
   } catch (err: any) {
     console.error("Create PaymentIntent error:", err);
@@ -149,79 +157,123 @@ app.post("/create-payment-intent", async (req, res) => {
 /* =========================================================
    2️⃣ FINALIZE BOOKING
 ========================================================= */
+
 app.post("/finalize-booking", async (req, res) => {
   try {
-    const { sessionId, operatorUid, riderUid, paymentIntentId } =
-      req.body;
+    const {
+      sessionId,
+      operatorUid,
+      riderUid,
+      paymentIntentId,
+      seatsCount,
+    } = req.body;
 
-    if (!sessionId || !operatorUid || !riderUid || !paymentIntentId) {
-      return res.status(400).json({ error: "Missing parameters" });
+    // =====================================================
+    // VALIDATION
+    // =====================================================
+
+    if (
+      !sessionId ||
+      !operatorUid ||
+      !riderUid ||
+      !paymentIntentId
+    ) {
+      return res.status(400).json({
+        error: "Missing parameters",
+      });
     }
 
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const riderRef = db.collection("users").doc(riderUid);
+    const requestedSeats = Math.max(
+      1,
+      Math.min(parseInt(seatsCount) || 1, 10)
+    );
 
+    // =====================================================
+    // REFS
+    // =====================================================
+
+    const sessionRef =
+      db.collection("slots").doc(sessionId);
+
+    const riderRef =
+      db.collection("users").doc(riderUid);
+
+    // aggregate doc
     const bookingRef = sessionRef
       .collection("booking")
       .doc(riderUid);
 
-    const bookingGlobalRef = db.collection("bookings").doc();
+    // immutable booking record
+    const bookingGlobalRef =
+      db.collection("bookings").doc();
 
-    // 🔥 Chat refs
-    const chatRef = db.collection("chats").doc(sessionId);
-    const membersRef = chatRef.collection("members");
-    const messageRef = chatRef.collection("messages").doc();
+    // chat
+    const chatRef =
+      db.collection("chats").doc(sessionId);
+
+    const membersRef =
+      chatRef.collection("members");
+
+    const messageRef =
+      chatRef.collection("messages").doc();
+
+    // =====================================================
+    // TRANSACTION
+    // =====================================================
 
     await db.runTransaction(async (tx) => {
-      /* =========================================================
-         🔥 STEP 1: ALL READS FIRST (VERY IMPORTANT)
-      ========================================================= */
+      // ---------------------------------------------------
+      // READS
+      // ---------------------------------------------------
 
-      const sessionSnap = await tx.get(sessionRef);
+      const [
+        sessionSnap,
+        riderSnap,
+        existingBookingSnap,
+        chatSnap,
+      ] = await Promise.all([
+        tx.get(sessionRef),
+        tx.get(riderRef),
+        tx.get(bookingRef),
+        tx.get(chatRef),
+      ]);
+
+      // ---------------------------------------------------
+      // VALIDATE DOCUMENTS
+      // ---------------------------------------------------
+
       if (!sessionSnap.exists) {
         throw new Error("Session not found");
       }
 
-      const riderSnap = await tx.get(riderRef);
       if (!riderSnap.exists) {
         throw new Error("Rider not found");
       }
 
-      const existingBooking = await tx.get(bookingRef);
-      if (existingBooking.exists) {
-        throw new Error("Already booked");
-      }
-
-      const chatSnap = await tx.get(chatRef); // ✅ moved BEFORE writes
-
-      /* =========================================================
-         🔥 STEP 2: PREP DATA
-      ========================================================= */
+      // ---------------------------------------------------
+      // DATA
+      // ---------------------------------------------------
 
       const session: any = sessionSnap.data();
+
       const rider: any = riderSnap.data();
 
-      const riderData = {
-        name: rider.userProfile?.name ?? rider.displayName ?? null,
-        phone: rider.userProfile?.phone_no ?? null,
-        photoURL: rider.photoURL ?? null,
-        email: rider.email ?? null,
-      };
-
-      const currentStatus =
+      const currentStatus: SessionStatus =
         session.status || SESSION_STATUS.OPEN;
 
-      // ❌ Block booking if activity already started/ended
+      // ---------------------------------------------------
+      // SESSION STATE VALIDATION
+      // ---------------------------------------------------
+
       if (
-        session.activityStatus === 'started' ||
-        session.activityStatus === 'ended'
+        session.activityStatus === "started" ||
+        session.activityStatus === "ended"
       ) {
         throw new Error(
-          'Booking closed. Session already started or ended.'
+          "Booking closed. Session already started or ended."
         );
       }
 
-      // ❌ Block invalid states
       if (
         currentStatus === SESSION_STATUS.CANCELLED ||
         currentStatus === SESSION_STATUS.CLAIMED
@@ -229,145 +281,367 @@ app.post("/finalize-booking", async (req, res) => {
         throw new Error("Session not bookable");
       }
 
-      if (session.bookedSeats >= session.totalSeats) {
-        throw new Error("Seats are full");
+      // ---------------------------------------------------
+      // SEAT VALIDATION
+      // ---------------------------------------------------
+
+      const availableSeats =
+        session.totalSeats - session.bookedSeats;
+
+      if (requestedSeats > availableSeats) {
+        throw new Error(
+          `Only ${availableSeats} seats available`
+        );
       }
 
-      const newBookedSeats = session.bookedSeats + 1;
+      // ---------------------------------------------------
+      // EXISTING AGGREGATE BOOKING
+      // ---------------------------------------------------
+
+      const existingBooking =
+        existingBookingSnap.exists
+          ? existingBookingSnap.data()
+          : null;
+
+      const existingSeats =
+        existingBooking?.seatsBooked || 0;
+
+      const newTotalSeats =
+        existingSeats + requestedSeats;
+
+      // ---------------------------------------------------
+      // RIDER SNAPSHOT
+      // ---------------------------------------------------
+
+      const riderData = {
+        name:
+          rider.userProfile?.name ??
+          rider.displayName ??
+          null,
+
+        phone:
+          rider.userProfile?.phone_no ??
+          null,
+
+        photoURL:
+          rider.photoURL ?? null,
+
+        email:
+          rider.email ?? null,
+      };
+
+      // ---------------------------------------------------
+      // SESSION STATUS CALCULATION
+      // ---------------------------------------------------
+
+      const newBookedSeats =
+        session.bookedSeats + requestedSeats;
 
       let newStatus = currentStatus;
 
-      if (newBookedSeats >= session.totalSeats) {
+      if (
+        newBookedSeats >= session.totalSeats
+      ) {
         newStatus = SESSION_STATUS.FULL;
       } else if (
-        newBookedSeats >= session.minRidersToConfirm &&
-        currentStatus === SESSION_STATUS.OPEN
+        newBookedSeats >=
+        session.minRidersToConfirm &&
+        currentStatus ===
+        SESSION_STATUS.OPEN
       ) {
-        newStatus = SESSION_STATUS.MIN_REACHED;
+        newStatus =
+          SESSION_STATUS.MIN_REACHED;
       }
 
-      /* =========================================================
-         🔥 STEP 3: WRITES START HERE
-      ========================================================= */
+      // ===================================================
+      // AGGREGATE RIDER BOOKING DOC
+      // ===================================================
 
-      // ✅ Session-level booking
-      tx.set(bookingRef, {
-        riderUid,
-        ...riderData,
-        paymentIntentId,
-        globalBookingId: bookingGlobalRef.id,
-        status: RIDER_PAYMENT_STATUS.AUTHORIZED,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      tx.set(
+        bookingRef,
+        {
+          riderUid,
 
-      // ✅ Global booking
+          rider: riderData,
+
+          // total seats across all attempts
+          seatsBooked: newTotalSeats,
+
+          // latest booking status
+          status:
+            RIDER_PAYMENT_STATUS.AUTHORIZED,
+
+          // all booking ids
+          bookingIds:
+            admin.firestore.FieldValue.arrayUnion(
+              bookingGlobalRef.id
+            ),
+
+          lastPaymentIntentId:
+            paymentIntentId,
+
+          lastBookingId:
+            bookingGlobalRef.id,
+
+          updatedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+          createdAt:
+            existingBookingSnap.exists
+              ? existingBooking?.createdAt
+              : admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      // ===================================================
+      // GLOBAL IMMUTABLE BOOKING RECORD
+      // ===================================================
+
       tx.set(bookingGlobalRef, {
-        // relations
-        riderId: riderUid,
-        operatorId: operatorUid,
+        // ids
+        bookingId:
+          bookingGlobalRef.id,
+
         slotId: sessionId,
+
+        riderId: riderUid,
+
+        operatorId: operatorUid,
 
         // rider snapshot
         rider: riderData,
 
         // session snapshot
-        ...session,
+        sessionSnapshot: {
+          title:
+            session.title ?? null,
+
+          date:
+            session.date ?? null,
+
+          startTime:
+            session.startTime ?? null,
+
+          endTime:
+            session.endTime ?? null,
+
+          pickup:
+            session.pickup ?? null,
+
+          dropoff:
+            session.dropoff ?? null,
+
+          operator:
+            session.operator ?? null,
+
+          pricePerSeat:
+            session.pricePerSeat ??
+            null,
+        },
 
         // booking
-        seatsBooked: 1,
+        seatsBooked:
+          requestedSeats,
+
+        totalAmount:
+          (session.pricePerSeat || 0) *
+          requestedSeats,
 
         // payment
         paymentIntentId,
-        paymentStatus: "authorized",
+
+        paymentStatus:
+          RIDER_PAYMENT_STATUS.AUTHORIZED,
+
         captureStatus: "pending",
 
-        // status
+        // booking status
         status: "booked",
 
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // ✅ Update session seats + status
+      // ===================================================
+      // UPDATE SESSION
+      // ===================================================
+
       tx.update(sessionRef, {
-        bookedSeats: newBookedSeats,
+        bookedSeats:
+          newBookedSeats,
+
         status: newStatus,
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // ✅ Create chat ONLY once
+      // ===================================================
+      // CREATE CHAT ONCE
+      // ===================================================
+
       if (!chatSnap.exists) {
         tx.set(chatRef, {
           sessionId,
-          operatorId: operatorUid,
-          membersIds: [operatorUid], // initial
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+
+          operatorId:
+            operatorUid,
+
+          membersIds: [
+            operatorUid,
+          ],
+
+          createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
           lastMessage: null,
         });
       }
 
-      // ✅ Add rider to members
+      // ===================================================
+      // ADD RIDER MEMBER
+      // ===================================================
+
       tx.set(
         membersRef.doc(riderUid),
         {
           userId: riderUid,
+
           role: "rider",
-          name: riderData.name,
-          photoURL: riderData.photoURL,
-          joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+
+          name:
+            riderData.name,
+
+          photoURL:
+            riderData.photoURL,
+
+          joinedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
 
-      // ✅ Ensure operator in members
+      // ===================================================
+      // ENSURE OPERATOR MEMBER
+      // ===================================================
+
       tx.set(
         membersRef.doc(operatorUid),
         {
           userId: operatorUid,
+
           role: "operator",
-          name: session?.operator?.name ?? null,
-          photoURL: session?.operator?.photoURL ?? null,
-          joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+
+          name:
+            session?.operator
+              ?.name ?? null,
+
+          photoURL:
+            session?.operator
+              ?.photoURL ??
+            null,
+
+          joinedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
 
-      // ✅ Update membersIds array (fast query)
+      // ===================================================
+      // FAST QUERY MEMBERS IDS
+      // ===================================================
+
       tx.set(
         chatRef,
         {
-          membersIds: admin.firestore.FieldValue.arrayUnion(riderUid),
+          membersIds:
+            admin.firestore.FieldValue.arrayUnion(
+              riderUid
+            ),
         },
         { merge: true }
       );
 
-      // ✅ System message
+      // ===================================================
+      // SYSTEM MESSAGE
+      // ===================================================
+
       tx.set(messageRef, {
         type: "system",
-        text: `${riderData.name || "A rider"} joined the chat`,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+
+        text: `${riderData.name ||
+          "A rider"
+          } joined the chat`,
+
+        createdAt:
+          admin.firestore.FieldValue.serverTimestamp(),
       });
     });
 
-    // 🚀 Send SMS notification after successful booking
-    // Re-fetch the data to get access outside transaction
-    const finalSessionSnap = await sessionRef.get();
-    const finalSession = finalSessionSnap.data() as any;
-    const finalRiderSnap = await riderRef.get();
-    const finalRider = finalRiderSnap.data() as any;
+    // =====================================================
+    // SMS AFTER TRANSACTION
+    // =====================================================
+
+    const [
+      finalSessionSnap,
+      finalRiderSnap,
+    ] = await Promise.all([
+      sessionRef.get(),
+      riderRef.get(),
+    ]);
+
+    const finalSession =
+      finalSessionSnap.data() as any;
+
+    const finalRider =
+      finalRiderSnap.data() as any;
 
     const finalRiderData = {
-      name: finalRider.displayName,
-      phone: finalRider.userProfile?.phone_no ?? null,
+      name:
+        finalRider.displayName ||
+        "Rider",
+
+      phone:
+        finalRider.userProfile
+          ?.phone_no ?? null,
     };
 
     if (finalRiderData.phone) {
-      // Send SMS asynchronously (don't block the response)
-      sendBookingSMS(finalRiderData.phone, finalSession, finalRiderData.name || "Rider").catch(console.error);
+      sendBookingSMS(
+        finalRiderData.phone,
+        finalSession,
+        finalRiderData.name,
+        requestedSeats
+      ).catch(console.error);
     }
 
-    return res.json({ success: true });
+    // =====================================================
+    // RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+
+      bookingId:
+        bookingGlobalRef.id,
+
+      seatsBooked:
+        requestedSeats,
+    });
   } catch (err: any) {
-    console.error("Finalize booking error:", err);
-    return res.status(400).json({ error: err.message });
+    console.error(
+      "Finalize booking error:",
+      err
+    );
+
+    return res.status(400).json({
+      success: false,
+      error: err.message,
+    });
   }
 });
 
@@ -494,77 +768,167 @@ app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
 
 app.post("/capture-payment", async (req, res) => {
   try {
-    const { sessionId, riderUid } = req.body;
+    const { bookingId } = req.body;
 
-    if (!sessionId || !riderUid) {
-      return res.status(400).json({ error: "Missing parameters" });
+    if (!bookingId) {
+      return res.status(400).json({
+        error: "Missing bookingId",
+      });
     }
 
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const bookingRef = sessionRef.collection("booking").doc(riderUid);
+    // =====================================================
+    // GLOBAL BOOKING
+    // =====================================================
 
-    const sessionSnap = await sessionRef.get();
-    if (!sessionSnap.exists) {
-      return res.status(404).json({ error: "Session not found" });
-    }
+    const bookingRef =
+      db.collection("bookings").doc(bookingId);
 
-    const session = sessionSnap.data();
-    const operatorStripeAccountId = session?.stripeAccountId;
+    const bookingSnap =
+      await bookingRef.get();
 
-    if (!operatorStripeAccountId) {
-      return res.status(400).json({ error: "Missing Stripe account" });
-    }
-
-    const bookingSnap = await bookingRef.get();
     if (!bookingSnap.exists) {
-      return res.status(404).json({ error: "Booking not found" });
+      return res.status(404).json({
+        error: "Booking not found",
+      });
     }
 
-    const booking: any = bookingSnap.data();
+    const booking: any =
+      bookingSnap.data();
 
-    if (booking.status === "captured") {
-      return res.status(400).json({ error: "Already captured" });
+    // =====================================================
+    // ALREADY CAPTURED
+    // =====================================================
+
+    if (
+      booking.paymentStatus ===
+      RIDER_PAYMENT_STATUS.CAPTURED
+    ) {
+      return res.status(400).json({
+        error: "Already captured",
+      });
     }
 
-    if (!booking.paymentIntentId) {
-      return res.status(400).json({ error: "Missing paymentIntentId" });
+    // =====================================================
+    // SESSION
+    // =====================================================
+
+    const sessionRef = db
+      .collection("slots")
+      .doc(booking.slotId);
+
+    const sessionSnap =
+      await sessionRef.get();
+
+    if (!sessionSnap.exists) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
     }
 
-    // 🔥 CAPTURE PAYMENT
+    const session: any =
+      sessionSnap.data();
+
+    const operatorStripeAccountId =
+      session.stripeAccountId;
+
+    // =====================================================
+    // STRIPE CAPTURE
+    // =====================================================
+
     await stripe.paymentIntents.capture(
       booking.paymentIntentId,
       {},
       {
-        stripeAccount: operatorStripeAccountId,
+        stripeAccount:
+          operatorStripeAccountId,
       }
     );
 
-    // ✅ Update booking status
+    // =====================================================
+    // UPDATE GLOBAL BOOKING
+    // =====================================================
+
     await bookingRef.update({
-      status: "captured",
-      capturedAt: new Date(),
+      paymentStatus:
+        RIDER_PAYMENT_STATUS.CAPTURED,
+
+      capturedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // 🚀 Send payment confirmation SMS
-    const riderSnap = await db.collection("users").doc(riderUid).get();
-    const rider = riderSnap.data() as any;
-    const riderData = {
-      name: rider.userProfile?.name ?? rider.displayName ?? null,
-      phone: rider.userProfile?.phone_no ?? null,
-    };
+    // =====================================================
+    // UPDATE AGGREGATE BOOKING
+    // =====================================================
 
-    if (riderData.phone) {
-      // Send SMS asynchronously (don't block the response)
-      sendPaymentConfirmationSMS(riderData.phone, session, riderData.name || "Rider").catch(console.error);
+    const aggregateBookingRef =
+      sessionRef
+        .collection("booking")
+        .doc(booking.riderId);
+
+    const aggregateSnap =
+      await aggregateBookingRef.get();
+
+    if (aggregateSnap.exists) {
+      const aggregate: any =
+        aggregateSnap.data();
+
+      const updatedAttempts =
+        (
+          aggregate.bookingAttempts || []
+        ).map((attempt: any) => {
+          if (
+            attempt.bookingId === bookingId
+          ) {
+            return {
+              ...attempt,
+              paymentStatus:
+                RIDER_PAYMENT_STATUS.CAPTURED,
+
+              capturedAt: new Date(),
+            };
+          }
+
+          return attempt;
+        });
+
+      await aggregateBookingRef.update({
+        bookingAttempts:
+          updatedAttempts,
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    // =====================================================
+    // SMS
+    // =====================================================
+
+    const riderPhone =
+      booking?.rider?.phone;
+
+    if (riderPhone) {
+      sendPaymentConfirmationSMS(
+        riderPhone,
+        session,
+        booking?.rider?.name || "Rider"
+      ).catch(console.error);
     }
 
     return res.status(200).json({
       success: true,
-      message: "Payment captured successfully",
+      message:
+        "Payment captured successfully",
     });
   } catch (err: any) {
-    console.error("Capture error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error(
+      "Capture payment error:",
+      err
+    );
+
+    return res.status(500).json({
+      error: err.message,
+    });
   }
 });
 
@@ -576,172 +940,352 @@ app.post("/capture-all", async (req, res) => {
   try {
     const { sessionId } = req.body;
 
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const sessionSnap = await sessionRef.get();
-
-    if (!sessionSnap.exists) {
-      return res.status(404).json({ error: "Session not found" });
+    if (!sessionId) {
+      return res.status(400).json({
+        error: "Missing sessionId",
+      });
     }
 
-    const operatorStripeAccountId = sessionSnap.data()?.stripeAccountId;
+    // =====================================================
+    // SESSION
+    // =====================================================
 
-    const bookingsSnap = await sessionRef.collection("booking").get();
+    const sessionRef =
+      db.collection("slots").doc(sessionId);
 
-    const captured = [];
-    const failed = [];
+    const sessionSnap =
+      await sessionRef.get();
 
-    // 🔥 STEP 1: Try capturing all
+    if (!sessionSnap.exists) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
+    }
+
+    const session: any =
+      sessionSnap.data();
+
+    const operatorStripeAccountId =
+      session.stripeAccountId;
+
+    // =====================================================
+    // ALL AUTHORIZED BOOKINGS
+    // =====================================================
+
+    const bookingsSnap =
+      await db
+        .collection("bookings")
+        .where("slotId", "==", sessionId)
+        .where(
+          "paymentStatus",
+          "==",
+          RIDER_PAYMENT_STATUS.AUTHORIZED
+        )
+        .get();
+
+    const captured: string[] = [];
+
+    const failed: any[] = [];
+
+    // =====================================================
+    // CAPTURE LOOP
+    // =====================================================
+
     for (const doc of bookingsSnap.docs) {
-      const booking = doc.data();
-
-      if (booking.status !== "authorized") continue;
+      const booking: any =
+        doc.data();
 
       try {
+        // ================================================
+        // STRIPE CAPTURE
+        // ================================================
+
         await stripe.paymentIntents.capture(
           booking.paymentIntentId,
           {},
           {
-            stripeAccount: operatorStripeAccountId,
+            stripeAccount:
+              operatorStripeAccountId,
           }
         );
 
+        // ================================================
+        // UPDATE GLOBAL BOOKING
+        // ================================================
+
         await doc.ref.update({
-          status: "captured",
-          capturedAt: new Date(),
+          paymentStatus:
+            RIDER_PAYMENT_STATUS.CAPTURED,
+
+          capturedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        captured.push(doc.id);
+        // ================================================
+        // UPDATE AGGREGATE BOOKING
+        // ================================================
 
+        const aggregateBookingRef =
+          sessionRef
+            .collection("booking")
+            .doc(booking.riderId);
+
+        const aggregateSnap =
+          await aggregateBookingRef.get();
+
+        if (aggregateSnap.exists) {
+          const aggregate: any =
+            aggregateSnap.data();
+
+          const updatedAttempts =
+            (
+              aggregate.bookingAttempts ||
+              []
+            ).map((attempt: any) => {
+              if (
+                attempt.bookingId ===
+                booking.bookingId
+              ) {
+                return {
+                  ...attempt,
+                  paymentStatus:
+                    RIDER_PAYMENT_STATUS.CAPTURED,
+
+                  capturedAt:
+                    new Date(),
+                };
+              }
+
+              return attempt;
+            });
+
+          await aggregateBookingRef.update({
+            bookingAttempts:
+              updatedAttempts,
+
+            updatedAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        captured.push(
+          booking.bookingId
+        );
       } catch (err: any) {
-        console.error("Capture failed:", booking.paymentIntentId, err.message);
+        console.error(
+          "Capture failed:",
+          booking.paymentIntentId,
+          err.message
+        );
 
         failed.push({
-          riderUid: doc.id,
-          paymentIntentId: booking.paymentIntentId,
+          bookingId:
+            booking.bookingId,
+
+          paymentIntentId:
+            booking.paymentIntentId,
         });
       }
     }
 
-    // 🔥 STEP 2: Handle failure → cancel remaining
+    // =====================================================
+    // HANDLE FAILURE
+    // =====================================================
+
     if (failed.length > 0) {
-      for (const doc of bookingsSnap.docs) {
-        const booking = doc.data();
-
-        if (booking.status !== "authorized") continue;
-
-        try {
-          await stripe.paymentIntents.cancel(
-            booking.paymentIntentId,
-            {
-              stripeAccount: operatorStripeAccountId,
-            }
-          );
-
-          await doc.ref.update({
-            status: "cancelled",
-            cancelledAt: new Date(),
-          });
-
-        } catch (err: any) {
-          console.error("Cancel failed:", booking.paymentIntentId, err.message);
-        }
-      }
-
-      // ❌ Update session status (FAILED / PARTIAL)
-      await sessionRef.update({
-        paymentStatus: "failed", // or "partial"
-        updatedAt: new Date(),
-      });
-
       return res.status(400).json({
         success: false,
-        message: "Some payments failed. Remaining payments cancelled.",
+
+        message:
+          "Some payments failed",
+
         captured,
+
         failed,
       });
     }
 
-    // ✅ STEP 3: All captured → update session
+    // =====================================================
+    // SESSION UPDATE
+    // =====================================================
+
     await sessionRef.update({
       paymentStatus: "captured",
-      updatedAt: new Date(),
+
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
     });
 
     return res.status(200).json({
       success: true,
-      message: "All payments captured successfully",
+
+      message:
+        "All payments captured successfully",
+
       captured,
     });
-
   } catch (err: any) {
-    console.error("Capture-all error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error(
+      "Capture all error:",
+      err
+    );
+
+    return res.status(500).json({
+      error: err.message,
+    });
   }
 });
 
 /* =========================================================
    CANCEL AMOUNT
 ========================================================= */
-
 app.post("/cancel-payment", async (req, res) => {
   try {
-    const { sessionId, riderUid } = req.body;
+    const { bookingId } = req.body;
 
-    if (!sessionId || !riderUid) {
-      return res.status(400).json({ error: "Missing parameters" });
+    if (!bookingId) {
+      return res.status(400).json({
+        error: "Missing bookingId",
+      });
     }
 
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const bookingRef = sessionRef.collection("booking").doc(riderUid);
+    // =====================================================
+    // GLOBAL BOOKING
+    // =====================================================
 
-    const sessionSnap = await sessionRef.get();
-    if (!sessionSnap.exists) {
-      return res.status(404).json({ error: "Session not found" });
-    }
+    const bookingRef =
+      db.collection("bookings").doc(bookingId);
 
-    const session = sessionSnap.data();
-    const operatorStripeAccountId = session?.stripeAccountId;
+    const bookingSnap =
+      await bookingRef.get();
 
-    if (!operatorStripeAccountId) {
-      return res.status(400).json({ error: "Missing Stripe account" });
-    }
-
-    const bookingSnap = await bookingRef.get();
     if (!bookingSnap.exists) {
-      return res.status(404).json({ error: "Booking not found" });
+      return res.status(404).json({
+        error: "Booking not found",
+      });
     }
 
-    const booking: any = bookingSnap.data();
+    const booking: any =
+      bookingSnap.data();
 
-    if (booking.status === "cancelled") {
-      return res.status(400).json({ error: "Already cancelled" });
+    // =====================================================
+    // ALREADY CANCELLED
+    // =====================================================
+
+    if (
+      booking.paymentStatus ===
+      RIDER_PAYMENT_STATUS.CANCELLED
+    ) {
+      return res.status(400).json({
+        error: "Already cancelled",
+      });
     }
 
-    if (!booking.paymentIntentId) {
-      return res.status(400).json({ error: "Missing paymentIntentId" });
+    // =====================================================
+    // SESSION
+    // =====================================================
+
+    const sessionRef = db
+      .collection("slots")
+      .doc(booking.slotId);
+
+    const sessionSnap =
+      await sessionRef.get();
+
+    if (!sessionSnap.exists) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
     }
 
-    // 🔥 CANCEL PAYMENT (release hold)
+    const session: any =
+      sessionSnap.data();
+
+    const operatorStripeAccountId =
+      session.stripeAccountId;
+
+    // =====================================================
+    // STRIPE CANCEL
+    // =====================================================
+
     await stripe.paymentIntents.cancel(
       booking.paymentIntentId,
       {
-        stripeAccount: operatorStripeAccountId,
+        stripeAccount:
+          operatorStripeAccountId,
       }
     );
 
-    // ✅ Update booking status
+    // =====================================================
+    // UPDATE GLOBAL BOOKING
+    // =====================================================
+
     await bookingRef.update({
-      status: "cancelled",
-      cancelledAt: new Date(),
+      paymentStatus:
+        RIDER_PAYMENT_STATUS.CANCELLED,
+
+      cancelledAt:
+        admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // =====================================================
+    // UPDATE AGGREGATE BOOKING
+    // =====================================================
+
+    const aggregateBookingRef =
+      sessionRef
+        .collection("booking")
+        .doc(booking.riderId);
+
+    const aggregateSnap =
+      await aggregateBookingRef.get();
+
+    if (aggregateSnap.exists) {
+      const aggregate: any =
+        aggregateSnap.data();
+
+      const updatedAttempts =
+        (
+          aggregate.bookingAttempts || []
+        ).map((attempt: any) => {
+          if (
+            attempt.bookingId === bookingId
+          ) {
+            return {
+              ...attempt,
+              paymentStatus:
+                RIDER_PAYMENT_STATUS.CANCELLED,
+
+              cancelledAt: new Date(),
+            };
+          }
+
+          return attempt;
+        });
+
+      await aggregateBookingRef.update({
+        bookingAttempts:
+          updatedAttempts,
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      message: "Payment cancelled successfully",
+      message:
+        "Payment cancelled successfully",
     });
   } catch (err: any) {
-    console.error("Cancel error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error(
+      "Cancel payment error:",
+      err
+    );
+
+    return res.status(500).json({
+      error: err.message,
+    });
   }
 });
 
