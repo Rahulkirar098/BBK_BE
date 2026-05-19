@@ -12,8 +12,6 @@ import {
   createPaymentIntent,
   reauth,
   success,
-  upload,
-  uploadImage
 } from "./controllers/index.js";
 import { SESSION_STATUS, RIDER_PAYMENT_STATUS, type SessionStatus } from "./types/index.js";
 
@@ -98,9 +96,9 @@ app.post("/finalize-booking", async (req, res) => {
       .collection("booking")
       .doc(riderUid);
 
-    // immutable booking record
+    // global booking record (one per rider + slot)
     const bookingGlobalRef =
-      db.collection("bookings").doc();
+      db.collection("bookings").doc(`${sessionId}_${riderUid}`);
 
     // chat
     const chatRef =
@@ -125,11 +123,13 @@ app.post("/finalize-booking", async (req, res) => {
         sessionSnap,
         riderSnap,
         existingBookingSnap,
+        existingGlobalBookingSnap,
         chatSnap,
       ] = await Promise.all([
         tx.get(sessionRef),
         tx.get(riderRef),
         tx.get(bookingRef),
+        tx.get(bookingGlobalRef),
         tx.get(chatRef),
       ]);
 
@@ -198,8 +198,16 @@ app.post("/finalize-booking", async (req, res) => {
           ? existingBookingSnap.data()
           : null;
 
+      const existingGlobalBooking =
+        existingGlobalBookingSnap.exists
+          ? existingGlobalBookingSnap.data()
+          : null;
+
       const existingSeats =
         existingBooking?.seatsBooked || 0;
+
+      const existingGlobalSeats =
+        existingGlobalBooking?.seatsBooked || 0;
 
       const newTotalSeats =
         existingSeats + requestedSeats;
@@ -272,6 +280,26 @@ app.post("/finalize-booking", async (req, res) => {
               bookingGlobalRef.id
             ),
 
+          // all payment intent ids
+          paymentIntentIds:
+            admin.firestore.FieldValue.arrayUnion(
+              paymentIntentId
+            ),
+
+          // booking attempts for capture/cancel tracking
+          bookingAttempts:
+            admin.firestore.FieldValue.arrayUnion({
+              bookingId: bookingGlobalRef.id,
+              paymentIntentId,
+              seatsBooked: requestedSeats,
+              paymentStatus:
+                RIDER_PAYMENT_STATUS.AUTHORIZED,
+              totalAmount:
+                (session.pricePerSeat || 0) *
+                requestedSeats,
+              bookedAt: new Date(),
+            }),
+
           lastPaymentIntentId:
             paymentIntentId,
 
@@ -292,60 +320,97 @@ app.post("/finalize-booking", async (req, res) => {
       );
 
       // ===================================================
-      // GLOBAL IMMUTABLE BOOKING RECORD
+      // GLOBAL BOOKING RECORD (MERGED PER RIDER + SLOT)
       // ===================================================
 
-      tx.set(bookingGlobalRef, {
-        // ids
-        bookingId: bookingGlobalRef.id,
-        captureStatus: "pending",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        operatorId: operatorUid,
-        // payment
-        paymentIntentId,
-        paymentStatus: RIDER_PAYMENT_STATUS.AUTHORIZED,
-        // rider snapshot
-        riderId: riderUid,
-        rider: riderData,
-        // booking
-        seatsBooked: requestedSeats,
-        // session snapshot
-        sessionSnapshot: {
-          title:
-            session.title ?? null,
+      const newGlobalTotalSeats =
+        existingGlobalSeats + requestedSeats;
 
-          date:
-            session.date ?? null,
+      const newGlobalTotalAmount =
+        (existingGlobalBooking?.totalAmount || 0) +
+        (session.pricePerSeat || 0) * requestedSeats;
 
-          startTime:
-            session.startTime ?? null,
+      tx.set(
+        bookingGlobalRef,
+        {
+          // ids
+          bookingId: bookingGlobalRef.id,
+          operatorId: operatorUid,
+          slotId: sessionId,
 
-          endTime:
-            session.endTime ?? null,
+          // rider snapshot
+          riderId: riderUid,
+          rider: riderData,
 
-          pickup:
-            session.pickup ?? null,
+          // merged seats & amount
+          seatsBooked: newGlobalTotalSeats,
+          totalAmount: newGlobalTotalAmount,
 
-          dropoff:
-            session.dropoff ?? null,
+          // latest payment info
+          lastPaymentIntentId: paymentIntentId,
+          paymentStatus: RIDER_PAYMENT_STATUS.AUTHORIZED,
 
-          operator:
-            session.operator ?? null,
+          // all payment intent ids
+          paymentIntentIds:
+            admin.firestore.FieldValue.arrayUnion(
+              paymentIntentId
+            ),
 
-          pricePerSeat:
-            session.pricePerSeat ??
-            null,
+          // booking attempts for capture/cancel tracking
+          bookingAttempts:
+            admin.firestore.FieldValue.arrayUnion({
+              paymentIntentId,
+              seatsBooked: requestedSeats,
+              paymentStatus:
+                RIDER_PAYMENT_STATUS.AUTHORIZED,
+              totalAmount:
+                (session.pricePerSeat || 0) *
+                requestedSeats,
+              bookedAt: new Date(),
+            }),
+
+          // session snapshot
+          sessionSnapshot: {
+            title:
+              session.title ?? null,
+
+            date:
+              session.date ?? null,
+
+            startTime:
+              session.startTime ?? null,
+
+            endTime:
+              session.endTime ?? null,
+
+            pickup:
+              session.pickup ?? null,
+
+            dropoff:
+              session.dropoff ?? null,
+
+            operator:
+              session.operator ?? null,
+
+            pricePerSeat:
+              session.pricePerSeat ??
+              null,
+          },
+
+          // booking status
+          status: "booked",
+          timeStart: session.timeStart,
+
+          updatedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+          createdAt:
+            existingGlobalBookingSnap.exists
+              ? existingGlobalBooking?.createdAt
+              : admin.firestore.FieldValue.serverTimestamp(),
         },
-        slotId: sessionId,
-        // booking status
-        status: "booked",
-        timeStart: session.timeStart,
-        totalAmount:
-          (session.pricePerSeat || 0) *
-          requestedSeats,
-        updatedAt:
-          admin.firestore.FieldValue.serverTimestamp(),
-      });
+        { merge: true }
+      );
 
       // ===================================================
       // UPDATE SESSION
@@ -614,25 +679,63 @@ app.post("/capture-payment", async (req, res) => {
       session.stripeAccountId;
 
     // =====================================================
-    // STRIPE CAPTURE
+    // CAPTURE ALL PAYMENT INTENTS IN THIS BOOKING
     // =====================================================
 
-    await stripe.paymentIntents.capture(
-      booking.paymentIntentId,
-      {},
-      {
-        stripeAccount:
-          operatorStripeAccountId,
-      }
+    const attempts: any[] =
+      booking.bookingAttempts || [];
+
+    const authorizedAttempts = attempts.filter(
+      (a: any) =>
+        a.paymentStatus ===
+        RIDER_PAYMENT_STATUS.AUTHORIZED
     );
+
+    if (authorizedAttempts.length === 0) {
+      return res.status(400).json({
+        status: false,
+        message: "No authorized payments to capture",
+      });
+    }
+
+    for (const attempt of authorizedAttempts) {
+      await stripe.paymentIntents.capture(
+        attempt.paymentIntentId,
+        {},
+        {
+          stripeAccount:
+            operatorStripeAccountId,
+        }
+      );
+    }
 
     // =====================================================
     // UPDATE GLOBAL BOOKING
     // =====================================================
 
+    const updatedGlobalAttempts = attempts.map(
+      (attempt: any) => {
+        if (
+          attempt.paymentStatus ===
+          RIDER_PAYMENT_STATUS.AUTHORIZED
+        ) {
+          return {
+            ...attempt,
+            paymentStatus:
+              RIDER_PAYMENT_STATUS.CAPTURED,
+            capturedAt: new Date(),
+          };
+        }
+        return attempt;
+      }
+    );
+
     await bookingRef.update({
       paymentStatus:
         RIDER_PAYMENT_STATUS.CAPTURED,
+
+      bookingAttempts:
+        updatedGlobalAttempts,
 
       capturedAt:
         admin.firestore.FieldValue.serverTimestamp(),
@@ -654,28 +757,27 @@ app.post("/capture-payment", async (req, res) => {
       const aggregate: any =
         aggregateSnap.data();
 
-      const updatedAttempts =
+      const updatedAggAttempts =
         (
           aggregate.bookingAttempts || []
         ).map((attempt: any) => {
           if (
-            attempt.bookingId === bookingId
+            attempt.paymentStatus ===
+            RIDER_PAYMENT_STATUS.AUTHORIZED
           ) {
             return {
               ...attempt,
               paymentStatus:
                 RIDER_PAYMENT_STATUS.CAPTURED,
-
               capturedAt: new Date(),
             };
           }
-
           return attempt;
         });
 
       await aggregateBookingRef.update({
         bookingAttempts:
-          updatedAttempts,
+          updatedAggAttempts,
 
         updatedAt:
           admin.firestore.FieldValue.serverTimestamp(),
@@ -754,7 +856,7 @@ app.post("/capture-all", async (req, res) => {
       session.stripeAccountId;
 
     // =====================================================
-    // ALL AUTHORIZED BOOKINGS
+    // ALL BOOKINGS WITH AUTHORIZED ATTEMPTS
     // =====================================================
 
     const bookingsSnap =
@@ -780,95 +882,123 @@ app.post("/capture-all", async (req, res) => {
       const booking: any =
         doc.data();
 
-      try {
-        // ================================================
-        // STRIPE CAPTURE
-        // ================================================
+      const attempts: any[] =
+        booking.bookingAttempts || [];
 
-        await stripe.paymentIntents.capture(
-          booking.paymentIntentId,
-          {},
-          {
-            stripeAccount:
-              operatorStripeAccountId,
-          }
-        );
+      const authorizedAttempts = attempts.filter(
+        (a: any) =>
+          a.paymentStatus ===
+          RIDER_PAYMENT_STATUS.AUTHORIZED
+      );
 
-        // ================================================
-        // UPDATE GLOBAL BOOKING
-        // ================================================
+      for (const attempt of authorizedAttempts) {
+        try {
+          // ================================================
+          // STRIPE CAPTURE
+          // ================================================
 
-        await doc.ref.update({
-          paymentStatus:
-            RIDER_PAYMENT_STATUS.CAPTURED,
+          await stripe.paymentIntents.capture(
+            attempt.paymentIntentId,
+            {},
+            {
+              stripeAccount:
+                operatorStripeAccountId,
+            }
+          );
 
-          capturedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-        });
+          captured.push(
+            attempt.paymentIntentId
+          );
+        } catch (err: any) {
+          console.error(
+            "Capture failed:",
+            attempt.paymentIntentId,
+            err.message
+          );
 
-        // ================================================
-        // UPDATE AGGREGATE BOOKING
-        // ================================================
+          failed.push({
+            bookingId:
+              booking.bookingId,
 
-        const aggregateBookingRef =
-          sessionRef
-            .collection("booking")
-            .doc(booking.riderId);
-
-        const aggregateSnap =
-          await aggregateBookingRef.get();
-
-        if (aggregateSnap.exists) {
-          const aggregate: any =
-            aggregateSnap.data();
-
-          const updatedAttempts =
-            (
-              aggregate.bookingAttempts ||
-              []
-            ).map((attempt: any) => {
-              if (
-                attempt.bookingId ===
-                booking.bookingId
-              ) {
-                return {
-                  ...attempt,
-                  paymentStatus:
-                    RIDER_PAYMENT_STATUS.CAPTURED,
-
-                  capturedAt:
-                    new Date(),
-                };
-              }
-
-              return attempt;
-            });
-
-          await aggregateBookingRef.update({
-            bookingAttempts:
-              updatedAttempts,
-
-            updatedAt:
-              admin.firestore.FieldValue.serverTimestamp(),
+            paymentIntentId:
+              attempt.paymentIntentId,
           });
         }
+      }
 
-        captured.push(
-          booking.bookingId
-        );
-      } catch (err: any) {
-        console.error(
-          "Capture failed:",
-          booking.paymentIntentId,
-          err.message
-        );
+      // ================================================
+      // UPDATE GLOBAL BOOKING ATTEMPTS
+      // ================================================
 
-        failed.push({
-          bookingId:
-            booking.bookingId,
+      const updatedAttempts = attempts.map(
+        (attempt: any) => {
+          if (
+            attempt.paymentStatus ===
+            RIDER_PAYMENT_STATUS.AUTHORIZED
+          ) {
+            return {
+              ...attempt,
+              paymentStatus:
+                RIDER_PAYMENT_STATUS.CAPTURED,
+              capturedAt: new Date(),
+            };
+          }
+          return attempt;
+        }
+      );
 
-          paymentIntentId:
-            booking.paymentIntentId,
+      await doc.ref.update({
+        paymentStatus:
+          RIDER_PAYMENT_STATUS.CAPTURED,
+
+        bookingAttempts:
+          updatedAttempts,
+
+        capturedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // ================================================
+      // UPDATE AGGREGATE BOOKING
+      // ================================================
+
+      const aggregateBookingRef =
+        sessionRef
+          .collection("booking")
+          .doc(booking.riderId);
+
+      const aggregateSnap =
+        await aggregateBookingRef.get();
+
+      if (aggregateSnap.exists) {
+        const aggregate: any =
+          aggregateSnap.data();
+
+        const updatedAggAttempts =
+          (
+            aggregate.bookingAttempts ||
+            []
+          ).map((attempt: any) => {
+            if (
+              attempt.paymentStatus ===
+              RIDER_PAYMENT_STATUS.AUTHORIZED
+            ) {
+              return {
+                ...attempt,
+                paymentStatus:
+                  RIDER_PAYMENT_STATUS.CAPTURED,
+                capturedAt: new Date(),
+              };
+            }
+            return attempt;
+          });
+
+        await aggregateBookingRef.update({
+          bookingAttempts:
+            updatedAggAttempts,
+
+          updatedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
         });
       }
     }
@@ -991,24 +1121,62 @@ app.post("/cancel-payment", async (req, res) => {
       session.stripeAccountId;
 
     // =====================================================
-    // STRIPE CANCEL
+    // CANCEL ALL AUTHORIZED PAYMENT INTENTS IN BOOKING
     // =====================================================
 
-    await stripe.paymentIntents.cancel(
-      booking.paymentIntentId,
-      {
-        stripeAccount:
-          operatorStripeAccountId,
-      }
+    const attempts: any[] =
+      booking.bookingAttempts || [];
+
+    const authorizedAttempts = attempts.filter(
+      (a: any) =>
+        a.paymentStatus ===
+        RIDER_PAYMENT_STATUS.AUTHORIZED
     );
+
+    if (authorizedAttempts.length === 0) {
+      return res.status(400).json({
+        status: false,
+        message: "No authorized payments to cancel",
+      });
+    }
+
+    for (const attempt of authorizedAttempts) {
+      await stripe.paymentIntents.cancel(
+        attempt.paymentIntentId,
+        {
+          stripeAccount:
+            operatorStripeAccountId,
+        }
+      );
+    }
 
     // =====================================================
     // UPDATE GLOBAL BOOKING
     // =====================================================
 
+    const updatedGlobalAttempts = attempts.map(
+      (attempt: any) => {
+        if (
+          attempt.paymentStatus ===
+          RIDER_PAYMENT_STATUS.AUTHORIZED
+        ) {
+          return {
+            ...attempt,
+            paymentStatus:
+              RIDER_PAYMENT_STATUS.CANCELLED,
+            cancelledAt: new Date(),
+          };
+        }
+        return attempt;
+      }
+    );
+
     await bookingRef.update({
       paymentStatus:
         RIDER_PAYMENT_STATUS.CANCELLED,
+
+      bookingAttempts:
+        updatedGlobalAttempts,
 
       cancelledAt:
         admin.firestore.FieldValue.serverTimestamp(),
@@ -1030,33 +1198,65 @@ app.post("/cancel-payment", async (req, res) => {
       const aggregate: any =
         aggregateSnap.data();
 
-      const updatedAttempts =
+      const updatedAggAttempts =
         (
           aggregate.bookingAttempts || []
         ).map((attempt: any) => {
           if (
-            attempt.bookingId === bookingId
+            attempt.paymentStatus ===
+            RIDER_PAYMENT_STATUS.AUTHORIZED
           ) {
             return {
               ...attempt,
               paymentStatus:
                 RIDER_PAYMENT_STATUS.CANCELLED,
-
               cancelledAt: new Date(),
             };
           }
-
           return attempt;
         });
 
       await aggregateBookingRef.update({
         bookingAttempts:
-          updatedAttempts,
+          updatedAggAttempts,
 
         updatedAt:
           admin.firestore.FieldValue.serverTimestamp(),
       });
     }
+
+    // =====================================================
+    // UPDATE SESSION BOOKED SEATS
+    // =====================================================
+
+    const cancelledSeats = authorizedAttempts.reduce(
+      (sum: number, a: any) => sum + (a.seatsBooked || 0),
+      0
+    );
+
+    const sessionData: any = sessionSnap.data();
+    const newBookedSeats = Math.max(
+      0,
+      (sessionData.bookedSeats || 0) - cancelledSeats
+    );
+
+    let newStatus = sessionData.status;
+    if (newBookedSeats < sessionData.totalSeats) {
+      if (
+        newBookedSeats >= sessionData.minRidersToConfirm
+      ) {
+        newStatus = SESSION_STATUS.MIN_REACHED;
+      } else {
+        newStatus = SESSION_STATUS.OPEN;
+      }
+    }
+
+    await sessionRef.update({
+      bookedSeats: newBookedSeats,
+      status: newStatus,
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+    });
 
     return res.status(200).json({
       status: true,
