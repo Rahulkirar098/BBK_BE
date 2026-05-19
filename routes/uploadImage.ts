@@ -1,6 +1,6 @@
 import express from "express";
-import { app } from "../app.ts";
-import { upload, uploadImage } from "../controllers/index.ts";
+import { app } from "../app.js";
+import { upload, uploadImage } from "../controllers/index.js";
 
 const uploadImageRoutes = express.Router();
 

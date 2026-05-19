@@ -1,6 +1,6 @@
 import express from "express";
-import { app } from "../app.ts";
-import { createBoat, editBoat, deleteBoat } from "../controllers/index.ts";
+import { app } from "../app.js";
+import { createBoat, editBoat, deleteBoat } from "../controllers/index.js";
 
 const boatRoutes = express.Router();
 

@@ -1,3 +1,3 @@
-export * from "./uploadImage.ts";
-export * from "./captain.ts";
-export * from "./boat.ts";
+export * from "./uploadImage.js";
+export * from "./captain.js";
+export * from "./boat.js";

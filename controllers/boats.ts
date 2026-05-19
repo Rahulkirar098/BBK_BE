@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
-import { CAPTION_STATUS } from "../types/index.ts";
+import { CAPTION_STATUS } from "../types/index.js";
 import { FieldValue } from "firebase-admin/firestore";
 
 // Firebase
-import { db } from "../services/firebase.ts";
+import { db } from "../services/firebase.js";
 
 const boats = db.collection("boats");
 

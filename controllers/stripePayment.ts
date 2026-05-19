@@ -1,6 +1,6 @@
-import { stripe } from "../app.ts";
-import { SESSION_STATUS, SessionStatus } from "../types/index.ts";
-import { db } from "../services/firebase.ts";
+import { stripe } from "../app.js";
+import { SESSION_STATUS, SessionStatus } from "../types/index.js";
+import { db } from "../services/firebase.js";
 
 
 const isFinalStatus = (status: SessionStatus) => {

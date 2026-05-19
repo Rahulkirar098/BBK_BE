@@ -1,7 +1,7 @@
 
 import { Request, Response } from "express";
-import { stripe } from "../app.ts";
-import { db } from "../services/firebase.ts";
+import { stripe } from "../app.js";
+import { db } from "../services/firebase.js";
 
 export const createConnectAccount = async (req: Request, res: Response) => {
     try {

@@ -2,9 +2,9 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import Stripe from "stripe";
-import { sendBookingSMS, sendPaymentConfirmationSMS } from "./services/twilio.ts";
+import { sendBookingSMS, sendPaymentConfirmationSMS } from "./services/twilio.js";
 import admin from "firebase-admin";
-import { app } from "./app.ts";
+import { app } from "./app.js";
 import {
   checkOnboardingStatus,
   createConnectAccount,
@@ -14,12 +14,12 @@ import {
   success,
   upload,
   uploadImage
-} from "./controllers/index.ts";
-import { SESSION_STATUS, RIDER_PAYMENT_STATUS, type SessionStatus } from "./types/index.ts";
+} from "./controllers/index.js";
+import { SESSION_STATUS, RIDER_PAYMENT_STATUS, type SessionStatus } from "./types/index.js";
 
-import { db } from './services/firebase.ts';
+import { db } from './services/firebase.js';
 
-import "./routes/index.ts";
+import "./routes/index.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2026-01-28.clover",

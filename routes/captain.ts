@@ -1,6 +1,6 @@
 import express from "express";
-import { app } from "../app.ts";
-import { createCaptain, editCaptain, deleteCaptain } from "../controllers/index.ts";
+import { app } from "../app.js";
+import { createCaptain, editCaptain, deleteCaptain } from "../controllers/index.js";
 
 const captainRoutes = express.Router();
 

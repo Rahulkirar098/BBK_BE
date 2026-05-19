@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import multer from "multer";
-import { bucket } from "../services/firebase.ts";
+import { bucket } from "../services/firebase.js";
 import { randomUUID } from "crypto";
 import fs from "fs";
 
