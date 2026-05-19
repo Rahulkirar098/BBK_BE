@@ -1,5 +1,7 @@
-import Stripe from "stripe";
 import dotenv from "dotenv";
+dotenv.config();
+
+import Stripe from "stripe";
 import { sendBookingSMS, sendPaymentConfirmationSMS } from "./services/twilio.ts";
 import admin from "firebase-admin";
 import { app } from "./app.ts";
@@ -18,8 +20,6 @@ import { SESSION_STATUS, RIDER_PAYMENT_STATUS, type SessionStatus } from "./type
 import { db } from './services/firebase.ts';
 
 import "./routes/index.ts";
-
-dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2026-01-28.clover",
@@ -1084,17 +1084,18 @@ app.get("/checkTwilo", (req, res) => {
   res.send({ status: true });
 });
 
-const PORT = process.env.PORT || 3000;
+// ✅ Vercel serverless export
+export default app;
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+// Only listen locally (not on Vercel)
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 3000;
 
-server.on("error", (err: any) => {
-  console.error("Server error:", err.message);
-});
+  const server = app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
 
-// ✅ Vercel
-export default function handler(req: any, res: any) {
-  return app(req, res);
+  server.on("error", (err: any) => {
+    console.error("Server error:", err.message);
+  });
 }
