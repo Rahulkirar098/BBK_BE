@@ -2,9 +2,8 @@ import { Request, Response } from "express";
 import multer from "multer";
 import { bucket } from "../services/firebase.js";
 import { randomUUID } from "crypto";
-import fs from "fs";
 
-export const upload = multer({ dest: "uploads/" });
+export const upload = multer({ storage: multer.memoryStorage() });
 
 export const uploadImage = async (req: Request, res: Response) => {
   try {
@@ -23,8 +22,8 @@ export const uploadImage = async (req: Request, res: Response) => {
 
     const token = randomUUID();
 
-    await bucket.upload(file.path, {
-      destination,
+    const fileRef = bucket.file(destination);
+    await fileRef.save(file.buffer, {
       metadata: {
         contentType: file.mimetype,
         metadata: {
@@ -32,9 +31,6 @@ export const uploadImage = async (req: Request, res: Response) => {
         },
       },
     });
-
-    // Clean up temp file
-    fs.unlinkSync(file.path);
 
     const url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(destination)}?alt=media&token=${token}`;
 
