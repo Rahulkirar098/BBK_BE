@@ -1,70 +1,33 @@
-import express from "express";
 import Stripe from "stripe";
-import cors from "cors";
 import dotenv from "dotenv";
+import { sendBookingSMS, sendPaymentConfirmationSMS } from "./services/twilio.ts";
 import admin from "firebase-admin";
-import { sendBookingSMS, sendPaymentConfirmationSMS } from "./twilio.js";
+import { app } from "./app.ts";
+import {
+  checkOnboardingStatus,
+  createConnectAccount,
+  createConnectAccountLink,
+  createPaymentIntent,
+  reauth,
+  success,
+  upload,
+  uploadImage
+} from "./controllers/index.ts";
+import { SESSION_STATUS, RIDER_PAYMENT_STATUS, type SessionStatus } from "./types/index.ts";
+
+import { db } from './services/firebase.ts';
+
+import "./routes/index.ts";
 
 dotenv.config();
-
-/* =========================================================
-   TYPES
-========================================================= */
-
-export const SESSION_STATUS = {
-  OPEN: "open",
-  MIN_REACHED: "min_reached",
-  FULL: "full",
-  CLAIMED: "claimed",
-  CANCELLED: "cancelled",
-} as const;
-
-export type SessionStatus =
-  typeof SESSION_STATUS[keyof typeof SESSION_STATUS];
-
-export const RIDER_PAYMENT_STATUS = {
-  AUTHORIZED: "authorized", // hold
-  CAPTURED: "captured",     // success
-  CANCELLED: "cancelled"   // released
-} as const;
-
-export type RiderPaymentStatus =
-  typeof RIDER_PAYMENT_STATUS[keyof typeof RIDER_PAYMENT_STATUS];
-
-/* =========================================================
-   INIT
-========================================================= */
-
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    }),
-  });
-}
-
-const app = express();
-app.use(cors());
-app.use(express.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2026-01-28.clover",
 });
 
-const db = admin.firestore();
-
 /* =========================================================
    HELPERS
 ========================================================= */
-
-const isFinalStatus = (status: SessionStatus) => {
-  return (
-    status === SESSION_STATUS.CLAIMED ||
-    status === SESSION_STATUS.CANCELLED
-  );
-};
 
 const canClaim = (status: SessionStatus) => {
   return (
@@ -75,7 +38,7 @@ const canClaim = (status: SessionStatus) => {
 
 //////////////
 
-app.get('/', (req, res) => {
+app.get('/', (_, res) => {
   res.send('Welcome to the API!...');
 });
 
@@ -83,76 +46,7 @@ app.get('/', (req, res) => {
    1️⃣ CREATE PAYMENT INTENT (HOLD FUNDS)
 ========================================================= */
 
-app.post("/create-payment-intent", async (req, res) => {
-  try {
-    const { sessionId, operatorUid, riderUid, operatorStripeAccountId, seatsCount } = req.body;
-
-    if (!sessionId || !operatorUid || !riderUid || !operatorStripeAccountId) {
-      return res.status(400).json({ error: "Missing parameters" });
-    }
-
-    const requestedSeats = Math.max(1, Math.min(parseInt(seatsCount) || 1, 10)); // max 10 seats per booking
-
-    const sessionRef = db.collection("slots").doc(sessionId);
-    const snap = await sessionRef.get();
-
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-
-    const session: any = snap.data();
-
-    const status: SessionStatus =
-      session.status || SESSION_STATUS.OPEN;
-
-    // ❌ Block booking if activity already started/ended
-    if (
-      session.activityStatus === 'started' ||
-      session.activityStatus === 'ended'
-    ) {
-      throw new Error(
-        'Booking closed. Session already started or ended.'
-      );
-    }
-
-    if (isFinalStatus(status)) {
-      return res.status(400).json({ error: "Session not bookable" });
-    }
-
-    const availableSeats = session.totalSeats - session.bookedSeats;
-    if (requestedSeats > availableSeats) {
-      return res.status(400).json({ error: `Only ${availableSeats} seats available` });
-    }
-
-    const totalAmount = session.pricePerSeat * requestedSeats * 100; // in cents
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: totalAmount,
-      currency: "aed",
-      capture_method: "manual",
-      metadata: {
-        sessionId,
-        operatorUid,
-        riderUid,
-        seatsCount: requestedSeats.toString(),
-      },
-    },
-      {
-        stripeAccount: operatorStripeAccountId,
-      }
-    );
-
-    return res.json({
-      paymentIntentId: paymentIntent.id,
-      clientSecret: paymentIntent.client_secret,
-      seatsCount: requestedSeats,
-      totalAmount: totalAmount / 100, // in AED for display
-    });
-  } catch (err: any) {
-    console.error("Create PaymentIntent error:", err);
-    return res.status(500).json({ error: err.message });
-  }
-});
+app.post("/create-payment-intent", createPaymentIntent);
 
 /* =========================================================
    2️⃣ FINALIZE BOOKING
@@ -179,7 +73,8 @@ app.post("/finalize-booking", async (req, res) => {
       !paymentIntentId
     ) {
       return res.status(400).json({
-        error: "Missing parameters",
+        status: false,
+        message: "Missing parameters",
       });
     }
 
@@ -383,6 +278,8 @@ app.post("/finalize-booking", async (req, res) => {
           lastBookingId:
             bookingGlobalRef.id,
 
+          timeStart: session.timeStart,
+
           updatedAt:
             admin.firestore.FieldValue.serverTimestamp(),
 
@@ -400,18 +297,18 @@ app.post("/finalize-booking", async (req, res) => {
 
       tx.set(bookingGlobalRef, {
         // ids
-        bookingId:
-          bookingGlobalRef.id,
-
-        slotId: sessionId,
-
-        riderId: riderUid,
-
+        bookingId: bookingGlobalRef.id,
+        captureStatus: "pending",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
         operatorId: operatorUid,
-
+        // payment
+        paymentIntentId,
+        paymentStatus: RIDER_PAYMENT_STATUS.AUTHORIZED,
         // rider snapshot
+        riderId: riderUid,
         rider: riderData,
-
+        // booking
+        seatsBooked: requestedSeats,
         // session snapshot
         sessionSnapshot: {
           title:
@@ -439,29 +336,13 @@ app.post("/finalize-booking", async (req, res) => {
             session.pricePerSeat ??
             null,
         },
-
-        // booking
-        seatsBooked:
-          requestedSeats,
-
+        slotId: sessionId,
+        // booking status
+        status: "booked",
+        timeStart: session.timeStart,
         totalAmount:
           (session.pricePerSeat || 0) *
           requestedSeats,
-
-        // payment
-        paymentIntentId,
-
-        paymentStatus:
-          RIDER_PAYMENT_STATUS.AUTHORIZED,
-
-        captureStatus: "pending",
-
-        // booking status
-        status: "booked",
-
-        createdAt:
-          admin.firestore.FieldValue.serverTimestamp(),
-
         updatedAt:
           admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -610,6 +491,8 @@ app.post("/finalize-booking", async (req, res) => {
           ?.phone_no ?? null,
     };
 
+    console.log("Rider phone for SMS:", finalRiderData.phone);
+
     if (finalRiderData.phone) {
       sendBookingSMS(
         finalRiderData.phone,
@@ -624,23 +507,22 @@ app.post("/finalize-booking", async (req, res) => {
     // =====================================================
 
     return res.status(200).json({
-      success: true,
-
+      status: true,
       bookingId:
         bookingGlobalRef.id,
 
       seatsBooked:
         requestedSeats,
     });
-  } catch (err: any) {
+  } catch (error: any) {
     console.error(
       "Finalize booking error:",
-      err
+      error
     );
 
     return res.status(400).json({
-      success: false,
-      error: err.message,
+      status: false,
+      message: error.message,
     });
   }
 });
@@ -648,119 +530,15 @@ app.post("/finalize-booking", async (req, res) => {
 /* =========================================================
     CONNECT ACCOUNT 
 ========================================================= */
-app.post("/create-connect-account", async (req, res) => {
-  try {
-    const { operatorUid, email } = req.body;
+app.post("/create-connect-account", createConnectAccount);
 
-    if (!operatorUid || !email) {
-      return res.status(400).json({ error: "Missing parameters" });
-    }
+app.post("/create-account-link", createConnectAccountLink);
 
-    const operatorRef = db.doc(`users/${operatorUid}`);
-    const snap = await operatorRef.get();
+app.get("/reauth", reauth);
 
-    // If already created
-    if (snap.exists && snap.data()?.stripeAccountId) {
-      return res.json({
-        stripeAccountId: snap.data()?.stripeAccountId,
-      });
-    }
+app.get("/success", success);
 
-    const account = await stripe.accounts.create({
-      type: "express",
-      country: "AE",
-      email,
-      capabilities: {
-        card_payments: { requested: true },
-        transfers: { requested: true },
-      },
-    });
-
-
-    await operatorRef.set(
-      {
-        stripeAccountId: account.id,
-        onboardingComplete: false,
-      },
-      { merge: true }
-    );
-
-    return res.json({
-      stripeAccountId: account.id,
-    });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: `Hello ${err.message}` });
-  }
-});
-
-app.post("/create-account-link", async (req, res) => {
-  try {
-    const { operatorUid } = req.body;
-
-    const operatorRef = db.doc(`users/${operatorUid}`);
-    const snap = await operatorRef.get();
-
-    if (!snap.exists || !snap.data()?.stripeAccountId) {
-      return res.status(400).json({ error: "Connect account not found" });
-    }
-
-    const accountLink = await stripe.accountLinks.create({
-      account: snap.data()?.stripeAccountId,
-      refresh_url: "https://bbk-be-1smn.vercel.app/reauth",
-      return_url: "https://bbk-be-1smn.vercel.app/success",
-      type: "account_onboarding",
-    });
-
-    return res.json({
-      url: accountLink.url,
-    });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/reauth", (req, res) => {
-  res.send("Re-auth required. Please try onboarding again.");
-});
-
-app.get("/success", (req, res) => {
-  res.send("Onboarding completed successfully ✅");
-});
-
-app.get("/check-onboarding-status/:operatorUid", async (req, res) => {
-  try {
-    const { operatorUid } = req.params;
-
-    const operatorRef = db.doc(`users/${operatorUid}`);
-    const snap = await operatorRef.get();
-
-    if (!snap.exists || !snap.data()?.stripeAccountId) {
-      return res.status(400).json({ error: "Account not found" });
-    }
-
-    const account = await stripe.accounts.retrieve(
-      snap.data()?.stripeAccountId
-    );
-
-    const isComplete =
-      account.details_submitted &&
-      account.charges_enabled &&
-      account.payouts_enabled;
-
-    await operatorRef.update({
-      onboardingComplete: isComplete,
-    });
-
-    return res.status(200).json({
-      onboardingComplete: isComplete,
-    });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: err.message });
-  }
-});
+app.get("/check-onboarding-status/:operatorUid", checkOnboardingStatus);
 
 /* =========================================================
    CAPTURE AMOUNT
@@ -772,7 +550,8 @@ app.post("/capture-payment", async (req, res) => {
 
     if (!bookingId) {
       return res.status(400).json({
-        error: "Missing bookingId",
+        status: false,
+        message: "Missing bookingId",
       });
     }
 
@@ -788,7 +567,8 @@ app.post("/capture-payment", async (req, res) => {
 
     if (!bookingSnap.exists) {
       return res.status(404).json({
-        error: "Booking not found",
+        status: false,
+        message: "Booking not found",
       });
     }
 
@@ -804,7 +584,8 @@ app.post("/capture-payment", async (req, res) => {
       RIDER_PAYMENT_STATUS.CAPTURED
     ) {
       return res.status(400).json({
-        error: "Already captured",
+        status: false,
+        message: "Already captured",
       });
     }
 
@@ -821,7 +602,8 @@ app.post("/capture-payment", async (req, res) => {
 
     if (!sessionSnap.exists) {
       return res.status(404).json({
-        error: "Session not found",
+        status: false,
+        message: "Session not found",
       });
     }
 
@@ -916,7 +698,7 @@ app.post("/capture-payment", async (req, res) => {
     }
 
     return res.status(200).json({
-      success: true,
+      status: true,
       message:
         "Payment captured successfully",
     });
@@ -927,7 +709,8 @@ app.post("/capture-payment", async (req, res) => {
     );
 
     return res.status(500).json({
-      error: err.message,
+      status: false,
+      message: `Hello ${err.message}`
     });
   }
 });
@@ -942,7 +725,8 @@ app.post("/capture-all", async (req, res) => {
 
     if (!sessionId) {
       return res.status(400).json({
-        error: "Missing sessionId",
+        status: false,
+        message: "Missing sessionId",
       });
     }
 
@@ -958,7 +742,8 @@ app.post("/capture-all", async (req, res) => {
 
     if (!sessionSnap.exists) {
       return res.status(404).json({
-        error: "Session not found",
+        status: false,
+        message: "Session not found",
       });
     }
 
@@ -1094,13 +879,10 @@ app.post("/capture-all", async (req, res) => {
 
     if (failed.length > 0) {
       return res.status(400).json({
-        success: false,
-
+        status: false,
         message:
           "Some payments failed",
-
         captured,
-
         failed,
       });
     }
@@ -1117,21 +899,21 @@ app.post("/capture-all", async (req, res) => {
     });
 
     return res.status(200).json({
-      success: true,
-
+      status: true,
       message:
         "All payments captured successfully",
 
       captured,
     });
-  } catch (err: any) {
+  } catch (error: any) {
     console.error(
       "Capture all error:",
-      err
+      error
     );
 
     return res.status(500).json({
-      error: err.message,
+      status: false,
+      message: error.message,
     });
   }
 });
@@ -1145,7 +927,8 @@ app.post("/cancel-payment", async (req, res) => {
 
     if (!bookingId) {
       return res.status(400).json({
-        error: "Missing bookingId",
+        status: false,
+        message: "Missing bookingId",
       });
     }
 
@@ -1161,7 +944,8 @@ app.post("/cancel-payment", async (req, res) => {
 
     if (!bookingSnap.exists) {
       return res.status(404).json({
-        error: "Booking not found",
+        status: false,
+        message: "Booking not found",
       });
     }
 
@@ -1177,7 +961,8 @@ app.post("/cancel-payment", async (req, res) => {
       RIDER_PAYMENT_STATUS.CANCELLED
     ) {
       return res.status(400).json({
-        error: "Already cancelled",
+        status: false,
+        message: "Already cancelled",
       });
     }
 
@@ -1194,7 +979,8 @@ app.post("/cancel-payment", async (req, res) => {
 
     if (!sessionSnap.exists) {
       return res.status(404).json({
-        error: "Session not found",
+        status: false,
+        message: "Session not found",
       });
     }
 
@@ -1273,18 +1059,18 @@ app.post("/cancel-payment", async (req, res) => {
     }
 
     return res.status(200).json({
-      success: true,
-      message:
-        "Payment cancelled successfully",
+      status: true,
+      message: "Payment cancelled successfully",
     });
-  } catch (err: any) {
+  } catch (error: any) {
     console.error(
       "Cancel payment error:",
-      err
+      error
     );
 
     return res.status(500).json({
-      error: err.message,
+      status: false,
+      message: error.message,
     });
   }
 });
@@ -1295,18 +1081,18 @@ app.post("/cancel-payment", async (req, res) => {
 
 app.get("/checkTwilo", (req, res) => {
   sendBookingSMS("+918602926908", { activity: "Surfing", timeStart: new Date(), location: "JBR", durationMinutes: 60, pricePerSeat: 100 }, "Rahul Kirar").catch(console.error)
-  res.send({ success: true });
+  res.send({ status: true });
 });
-
 
 const PORT = process.env.PORT || 3000;
 
-// ✅ Local
-if (process.env.NODE_ENV !== "production") {
-  app.listen(PORT, () => {
-    console.log(`🚀 Local server running on port ${PORT}`);
-  });
-}
+const server = app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
+
+server.on("error", (err: any) => {
+  console.error("Server error:", err.message);
+});
 
 // ✅ Vercel
 export default function handler(req: any, res: any) {
